@@ -70,8 +70,20 @@ private enum MonitorError: LocalizedError {
 
 private final class KeychainTokenStore {
     private let service = "io.github.huangsw666.sub2api-menubar"
+    private let legacyService = "local.ai-latency-monitor"
 
     func load(site: String) -> TokenRecord? {
+        if let token = load(site: site, service: service) {
+            return token
+        }
+        guard let token = load(site: site, service: legacyService) else {
+            return nil
+        }
+        try? save(token, site: site)
+        return token
+    }
+
+    private func load(site: String, service: String) -> TokenRecord? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -597,6 +609,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             let loaded = try loadConfig()
             config = loaded
+            _ = tokenStore.load(site: loaded.sub2api.name)
+            for upstream in loaded.upstreams {
+                _ = tokenStore.load(site: upstream.site.name)
+            }
             subClient = AuthenticatedAPIClient(site: loaded.sub2api, timeout: loaded.httpTimeout, tokens: tokenStore)
             scheduleTimers(loaded)
             refreshAll()
