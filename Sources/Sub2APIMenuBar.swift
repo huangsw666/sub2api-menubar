@@ -452,9 +452,9 @@ private final class AccountRowView: FlippedView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        detailLabel.font = .systemFont(ofSize: 11)
+        detailLabel.font = .systemFont(ofSize: 12)
         detailLabel.textColor = .secondaryLabelColor
-        metricLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        metricLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         metricLabel.textColor = .secondaryLabelColor
         metricLabel.lineBreakMode = .byTruncatingTail
         scheduleToggle.font = .systemFont(ofSize: 11)
@@ -590,10 +590,10 @@ private final class AIDashboardViewController: NSViewController {
     var onSkipAccount: ((Int, Bool) -> Void)?
 
     override func loadView() {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 430))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 645))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        contentScroll.frame = NSRect(x: 0, y: 38, width: 360, height: 392)
+        contentScroll.frame = NSRect(x: 0, y: 38, width: 360, height: 607)
         contentScroll.hasVerticalScroller = true
         contentScroll.autohidesScrollers = true
         contentScroll.borderType = .noBorder
@@ -610,7 +610,7 @@ private final class AIDashboardViewController: NSViewController {
         title.font = .systemFont(ofSize: 16, weight: .semibold)
         ttftValue.font = .monospacedDigitSystemFont(ofSize: 34, weight: .semibold)
         ttftValue.textColor = .systemBlue
-        usageDetail.font = .systemFont(ofSize: 12)
+        usageDetail.font = .systemFont(ofSize: 13)
         usageDetail.textColor = .secondaryLabelColor
         usageDetail.maximumNumberOfLines = 2
 
@@ -627,7 +627,7 @@ private final class AIDashboardViewController: NSViewController {
         balanceValue.cell?.wraps = true
         balanceValue.cell?.usesSingleLineMode = false
         channelTitle.font = .systemFont(ofSize: 13, weight: .medium)
-        channelValue.font = .systemFont(ofSize: 12)
+        channelValue.font = .systemFont(ofSize: 13)
         channelValue.maximumNumberOfLines = 3
         channelValue.textColor = .secondaryLabelColor
         let statusBox = boxView()
@@ -678,7 +678,7 @@ private final class AIDashboardViewController: NSViewController {
         }
         updateValue.frame = NSRect(x: 228, y: 9, width: 122, height: 16)
         updateValue.alignment = .right
-        updateValue.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        updateValue.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         updateValue.textColor = .tertiaryLabelColor
         container.addSubview(updateValue)
         view = container
@@ -751,10 +751,10 @@ private final class AIDashboardViewController: NSViewController {
         recentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let shown = Array(values.suffix(5))
         for index in 0..<5 {
-            let text = index < shown.count ? formatDuration(shown[index]) : "--"
+            let text = index < shown.count ? formatRecentDuration(shown[index]) : "--"
             let field = NSTextField(labelWithString: text)
             field.alignment = .center
-            field.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+            field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
             field.wantsLayer = true
             field.layer?.cornerRadius = 4
             field.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
@@ -764,6 +764,10 @@ private final class AIDashboardViewController: NSViewController {
 
     private func formatDuration(_ milliseconds: Double) -> String {
         milliseconds >= 1000 ? String(format: "%.2fs", milliseconds / 1000) : "\(Int(milliseconds))ms"
+    }
+
+    private func formatRecentDuration(_ milliseconds: Double) -> String {
+        String(format: "%.1fs", milliseconds / 1000)
     }
 
     private func updateAccounts(_ entries: [AccountListEntry]) {
@@ -851,7 +855,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.sendAction(on: [.leftMouseDown])
         popover.behavior = .transient
         popover.animates = false
-        popover.contentSize = NSSize(width: 360, height: 430)
+        popover.contentSize = NSSize(width: 360, height: 645)
         popover.contentViewController = dashboard
         _ = dashboard.view
         dashboard.onRefresh = { [weak self] in self?.refreshAll() }

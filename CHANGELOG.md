@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file.
 - Third-party relay login is no longer opened automatically
 - Schedulable accounts are sorted before paused accounts
 - Menu bar text is compact so it is less likely to be hidden on crowded displays
+- Recent TTFT values use a larger one-decimal display and secondary text is easier to read
+- Popover height is increased by 50% to show more upstream accounts at once
 
 ## [0.1.2] - 2026-08-17
 
