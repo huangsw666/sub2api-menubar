@@ -32,6 +32,17 @@ macOS 菜单栏监控工具。
 菜单栏会根据 Sub2API 实际选择的账户类型改变显示内容：OAuth 账户显示订阅
 剩余额度，API Key 中转显示余额、倍率、并发、PING 和可用性。
 
+### v0.2.0 上游账户管理
+
+单一可滚动概览会集中显示当前请求、最近首字延迟、全部上游账户、调度开关、
+订阅额度、中转健康状态，以及按需登录第三方监控的操作。
+
+<p align="center">
+  <img src="docs/images/upstream-account-management.png" alt="Sub2API Menu Bar v0.2.0 上游账户管理概览" width="386">
+</p>
+
+### 账户类型详情
+
 <table>
   <tr>
     <th>OAuth 订阅账户</th>

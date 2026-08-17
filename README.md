@@ -37,6 +37,18 @@ The menu bar adapts to the account type selected by Sub2API. OAuth accounts
 show remaining subscription quota, while API key relays show balance,
 multiplier, concurrency, PING, and availability.
 
+### v0.2.0 upstream account management
+
+The single scrollable overview shows the current request, recent TTFT samples,
+all upstream accounts, scheduling switches, quota, relay health, and selective
+third-party monitoring login in one place.
+
+<p align="center">
+  <img src="docs/images/upstream-account-management.png" alt="Sub2API Menu Bar v0.2.0 upstream account management overview" width="386">
+</p>
+
+### Account-type details
+
 <table>
   <tr>
     <th>OAuth subscription</th>
