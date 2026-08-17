@@ -24,6 +24,23 @@ The app is read-only. It does not change Sub2API routing or account state.
 Tokens captured after web login are stored in macOS Keychain, not in the JSON
 configuration.
 
+## Screenshots
+
+The menu bar adapts to the account type selected by Sub2API. OAuth accounts
+show remaining subscription quota, while API key relays show balance,
+multiplier, concurrency, PING, and availability.
+
+<table>
+  <tr>
+    <th>OAuth subscription</th>
+    <th>API key relay</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/oauth-subscription.png" alt="Sub2API Menu Bar showing an OAuth subscription account" width="340"></td>
+    <td><img src="docs/images/api-key-relay.png" alt="Sub2API Menu Bar showing a third-party API key relay" width="340"></td>
+  </tr>
+</table>
+
 ## Requirements
 
 - macOS 13 or newer
