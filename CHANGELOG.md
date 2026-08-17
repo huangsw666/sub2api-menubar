@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.2] - 2026-08-17
+
+### Fixed
+
+- Automatically discover third-party relay origins from Sub2API account credentials
+- Match relay API keys to Sub2API account names without manual adapters
+- Query channel health only after discovering the matched key's actual group
+- Keep manual upstream entries as optional overrides for non-standard relays
+
 ## [0.1.1] - 2026-08-17
 
 ### Added

@@ -92,7 +92,6 @@ The minimal configuration monitors the latest matching Sub2API request:
   "tracked_user_id": null,
   "tracked_api_key_id": null,
   "tracked_group": null,
-  "upstreams": [],
   "usage_interval_seconds": 10,
   "channel_interval_seconds": 30,
   "balance_interval_seconds": 60,
@@ -103,7 +102,49 @@ The minimal configuration monitors the latest matching Sub2API request:
 Set any tracking field to narrow the usage query. Leave it `null` to accept
 the latest usage record visible to the signed-in administrator.
 
-For an API key relay with a compatible monitoring API, add an adapter:
+### Automatic API key relay discovery
+
+No relay adapter is required for the normal case. When the latest request uses
+an API key account, the app automatically:
+
+1. Reads the account name and `credentials.base_url` from Sub2API.
+2. Opens the monitoring site at the origin of that URL.
+3. Finds the API key whose name exactly matches the Sub2API account name
+   (case-insensitive).
+4. Reads that key's group, multiplier, and concurrency.
+5. Uses the group name to query channel latency, PING, and availability.
+
+For example, a Sub2API account named `callai` must have an API key named
+`callai` on the third-party relay. Matching is case-insensitive, but otherwise
+exact: if no same-name key exists, the app reports the mismatch instead of
+guessing another key. On first use, the app asks you to sign in to the
+discovered monitoring site and stores its token in macOS Keychain.
+
+<table>
+  <tr>
+    <th>1. Sub2API account name</th>
+    <th>2. Third-party relay API key name</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/sub2api-account-name.png" alt="Sub2API account named callai" width="440"></td>
+    <td><img src="docs/images/relay-api-key-name.png" alt="Third-party relay API key named callai" width="440"></td>
+  </tr>
+</table>
+
+The relay is expected to expose:
+
+- `GET /api/v1/auth/me` with a `balance` field
+- `GET /api/v1/keys` with key group, multiplier, and concurrency fields
+- `GET /api/v1/channel-monitors` with status, latency, PING, and availability
+
+Responses may be arrays or common paginated objects using `items`, `records`,
+`list`, or `monitors`.
+
+### Optional relay overrides
+
+Most users do not need this. Add an entry to `upstreams` only when the relay's
+monitoring origin, login path, API key name, or channel group cannot be derived
+with the rules above:
 
 ```json
 {
@@ -116,18 +157,8 @@ For an API key relay with a compatible monitoring API, add an adapter:
 }
 ```
 
-Place it inside the top-level `upstreams` array. `account_names` are the names
-reported by Sub2API; matching is case-insensitive. When the latest request is
-routed to that account, the second key button signs in to its monitoring site.
-
-The optional relay adapter expects:
-
-- `GET /api/v1/auth/me` with a `balance` field
-- `GET /api/v1/keys` with key group, multiplier, and concurrency fields
-- `GET /api/v1/channel-monitors` with status, latency, PING, and availability
-
-Responses may be arrays or common paginated objects using `items`, `records`,
-`list`, or `monitors`.
+`account_names` are the names reported by Sub2API and matching is
+case-insensitive.
 
 ## Service management
 

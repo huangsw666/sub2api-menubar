@@ -17,7 +17,7 @@ from typing import Optional
 
 LABEL = "io.github.huangsw666.sub2api-menubar"
 APP_NAME = "Sub2API Menu Bar.app"
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 
 def paths():
@@ -64,7 +64,7 @@ def write_info_plist(bundle: Path) -> None:
                 "CFBundleName": "Sub2API Menu Bar",
                 "CFBundlePackageType": "APPL",
                 "CFBundleShortVersionString": VERSION,
-                "CFBundleVersion": "2",
+                "CFBundleVersion": "3",
                 "LSMinimumSystemVersion": "13.0",
                 "LSUIElement": True,
                 "NSAppTransportSecurity": {"NSAllowsArbitraryLoads": True},
