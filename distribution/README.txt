@@ -16,6 +16,9 @@ Installation
 
    launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
 
+Third-party relays are discovered automatically from Sub2API account records.
+The Sub2API account name must match the relay API key name (case-insensitive).
+
 The app is ad-hoc signed but not notarized. It stores login tokens in macOS
 Keychain and keeps credentials out of config.json. After you approve
 install.command, it removes quarantine from only the installed app bundle so

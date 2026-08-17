@@ -32,7 +32,7 @@ private struct AIConfig: Decodable {
     let tracked_user_id: Int?
     let tracked_api_key_id: Int?
     let tracked_group: String?
-    let upstreams: [UpstreamConfig]
+    let upstreams: [UpstreamConfig]?
     let usage_interval_seconds: Double?
     let channel_interval_seconds: Double?
     let balance_interval_seconds: Double?
@@ -46,6 +46,7 @@ private struct AIConfig: Decodable {
     var channelInterval: Double { max(10, channel_interval_seconds ?? 30) }
     var balanceInterval: Double { max(10, balance_interval_seconds ?? 60) }
     var httpTimeout: Double { max(2, http_timeout_seconds ?? 8) }
+    var upstreamOverrides: [UpstreamConfig] { upstreams ?? [] }
 }
 
 private struct TokenRecord: Codable {
@@ -610,7 +611,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             let loaded = try loadConfig()
             config = loaded
             _ = tokenStore.load(site: loaded.sub2api.name)
-            for upstream in loaded.upstreams {
+            for upstream in loaded.upstreamOverrides {
                 _ = tokenStore.load(site: upstream.site.name)
             }
             subClient = AuthenticatedAPIClient(site: loaded.sub2api, timeout: loaded.httpTimeout, tokens: tokenStore)
@@ -704,7 +705,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                         self.externalKey = nil
                     }
                     self.usage = snapshot
-                    self.configureUpstream(for: snapshot.account)
                     self.refreshAccountIfNeeded(id: snapshot.accountID)
                     self.markUpdated()
                 case .failure(let error): self.showError(error.localizedDescription)
@@ -714,8 +714,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshChannel() {
-        guard usesConfiguredExternal, let upstream = activeUpstream, let upstreamClient else { return }
-        let channelGroup = upstream.channel_group ?? upstream.key_name ?? upstream.name
+        guard usesExternalRelay, let upstream = activeUpstream, let upstreamClient,
+              let channelGroup = externalKey?.group ?? upstream.channel_group else { return }
         upstreamClient.get(path: "/api/v1/channel-monitors") { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -744,7 +744,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshBalance() {
-        guard usesConfiguredExternal else { return }
+        guard usesExternalRelay else { return }
         upstreamClient?.get(path: "/api/v1/auth/me") { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -764,7 +764,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshExternalKey() {
-        guard usesConfiguredExternal, let upstream = activeUpstream, let upstreamClient else { return }
+        guard usesExternalRelay, let upstream = activeUpstream, let upstreamClient else { return }
         let keyName = upstream.key_name ?? usage?.account ?? upstream.name
         let query = [
             URLQueryItem(name: "page", value: "1"),
@@ -778,9 +778,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     guard let item = self.items(from: object).first(where: {
                         let name = self.string($0, keys: ["name"])?.lowercased()
                         return name == keyName.lowercased()
-                    }), let group = item["group"] as? [String: Any],
+                    }) else {
+                        self.showError("找不到同名上游密钥 \(keyName)")
+                        return
+                    }
+                    guard let group = item["group"] as? [String: Any],
                           let multiplier = self.number(group, keys: ["rate_multiplier"]) else {
-                        self.showError("上游密钥倍率无法解析")
+                        self.showError("同名密钥缺少分组或倍率")
                         return
                     }
                     self.externalKey = ExternalKeySnapshot(
@@ -790,6 +794,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                         currentConcurrency: self.number(item, keys: ["current_concurrency"]).map(Int.init)
                     )
                     self.markUpdated()
+                    self.refreshChannel()
                 case .failure(let error): self.showError(error.localizedDescription)
                 }
             }
@@ -812,14 +817,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return group == nil || group?.caseInsensitiveCompare(trackedGroup) == .orderedSame
     }
 
-    private var usesConfiguredExternal: Bool {
+    private var usesExternalRelay: Bool {
         guard let account, !account.isSubscription else { return false }
         return activeUpstream?.matches(accountName: account.name) == true
     }
 
-    private func configureUpstream(for accountName: String) {
+    private func configureUpstream(for accountName: String, accountItem: [String: Any]? = nil) {
         guard let config else { return }
-        let next = config.upstreams.first { $0.matches(accountName: accountName) }
+        let override = config.upstreamOverrides.first { $0.matches(accountName: accountName) }
+        let discovered = accountItem.flatMap { discoverUpstream(accountName: accountName, accountItem: $0) }
+        let next = override ?? discovered
         guard next?.name != activeUpstream?.name || next?.base_url != activeUpstream?.base_url else { return }
         activeUpstream = next
         upstreamClient = next.map {
@@ -828,6 +835,30 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         balance = nil
         channel = nil
         externalKey = nil
+    }
+
+    private func discoverUpstream(accountName: String, accountItem: [String: Any]) -> UpstreamConfig? {
+        guard let credentials = accountItem["credentials"] as? [String: Any],
+              let apiBaseURL = string(credentials, keys: ["base_url", "baseUrl"]),
+              let monitorBaseURL = originURL(from: apiBaseURL) else { return nil }
+        return UpstreamConfig(
+            name: accountName,
+            account_names: [accountName],
+            base_url: monitorBaseURL,
+            login_path: "/login",
+            key_name: accountName,
+            channel_group: nil
+        )
+    }
+
+    private func originURL(from value: String) -> String? {
+        guard let source = URLComponents(string: value),
+              let scheme = source.scheme, let host = source.host else { return nil }
+        var origin = URLComponents()
+        origin.scheme = scheme
+        origin.host = host
+        origin.port = source.port
+        return origin.url?.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     private func refreshAccountIfNeeded(id: Int) {
@@ -863,9 +894,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                         remaining7d: used7d.map { max(0, min(100, 100 - $0)) }
                     )
                     self.accountUpdatedAt = Date()
+                    if let accountName = self.account?.name {
+                        self.configureUpstream(for: accountName, accountItem: item)
+                    }
                     if self.account?.isSubscription == false {
+                        guard let site = self.activeUpstream?.site else {
+                            self.showError("账户缺少可用的 credentials.base_url")
+                            return
+                        }
+                        if self.tokenStore.load(site: site.name) == nil {
+                            self.showLogin(for: site)
+                            self.markUpdated()
+                            return
+                        }
                         self.refreshBalance()
-                        self.refreshChannel()
                         self.refreshExternalKey()
                     }
                     self.markUpdated()
