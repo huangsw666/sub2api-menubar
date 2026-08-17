@@ -146,7 +146,8 @@ launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
 ### 账户调度
 
 概览中的上游区域会列出 `GET /api/v1/admin/accounts` 返回的全部账户。参与调度的账户
-始终排在暂停调度的账户前面；同一组内，最近请求实际使用的账户优先显示。每个账户的“调度”
+始终排在暂停调度的账户前面；参与调度组内当前账户优先，暂停调度组按最近使用时间从新到旧
+排序，从未使用的账户排在最后。每个账户的“调度”
 开关调用 `POST /api/v1/admin/accounts/:id/schedulable`，只提交一个
 `schedulable` 布尔值。暂停最近请求正在使用的账户时需要确认；应用也不会允许暂停最后一个
 仍参与调度的账户。

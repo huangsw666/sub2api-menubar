@@ -154,8 +154,9 @@ Responses may be arrays or common paginated objects using `items`, `records`,
 ### Account scheduling
 
 The upstream section lists every account returned by `GET /api/v1/admin/accounts`.
-Schedulable accounts are always sorted before paused accounts; within each
-group, the account used by the latest request appears first.
+Schedulable accounts are always sorted before paused accounts. The current
+account appears first in the schedulable group, while paused accounts are
+ordered by most recent use; accounts that have never been used appear last.
 The `调度` switch calls `POST /api/v1/admin/accounts/:id/schedulable` with a
 single `schedulable` boolean. Disabling the account currently handling the
 latest request requires confirmation, and the app refuses to disable the last

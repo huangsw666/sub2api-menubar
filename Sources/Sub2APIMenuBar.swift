@@ -418,10 +418,14 @@ private func formatRateMultiplier(_ value: Double) -> String {
     return text + "x"
 }
 
-private func formatCompactTimestamp(_ value: String) -> String {
+private func parseTimestamp(_ value: String) -> Date? {
     let isoFormatter = ISO8601DateFormatter()
     isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    let date = isoFormatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    return isoFormatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+}
+
+private func formatCompactTimestamp(_ value: String) -> String {
+    let date = parseTimestamp(value)
     guard let date else {
         return value.count > 19 ? String(value.prefix(19)).replacingOccurrences(of: "T", with: " ") : value
     }
@@ -1395,7 +1399,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 accountMetric = ""
             }
             let multiplier = externalKey.map { " \(formatRateMultiplier($0.rateMultiplier))" } ?? ""
-            statusItem.button?.title = latency
+            statusItem.button?.title = latency + accountMetric + multiplier
             statusItem.button?.toolTip = "\(usage.account) · \(usage.model) · 首字延迟 \(Int(usage.firstTokenMs))ms\(accountMetric)\(multiplier)"
         } else {
             statusItem.button?.title = lastError == nil ? "AI --" : "AI !"
@@ -1403,9 +1407,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let sortedAccounts = accounts.sorted { lhs, rhs in
             if lhs.schedulable != rhs.schedulable { return lhs.schedulable }
-            let lhsIsCurrent = usage?.accountID == lhs.id
-            let rhsIsCurrent = usage?.accountID == rhs.id
-            if lhsIsCurrent != rhsIsCurrent { return lhsIsCurrent }
+            if lhs.schedulable {
+                let lhsIsCurrent = usage?.accountID == lhs.id
+                let rhsIsCurrent = usage?.accountID == rhs.id
+                if lhsIsCurrent != rhsIsCurrent { return lhsIsCurrent }
+            } else {
+                let lhsLastUsed = lhs.lastUsedAt.flatMap(parseTimestamp)
+                let rhsLastUsed = rhs.lastUsedAt.flatMap(parseTimestamp)
+                if lhsLastUsed != rhsLastUsed {
+                    if let lhsLastUsed, let rhsLastUsed { return lhsLastUsed > rhsLastUsed }
+                    return lhsLastUsed != nil
+                }
+            }
             let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
             return nameOrder == .orderedSame ? lhs.id < rhs.id : nameOrder == .orderedAscending
         }
