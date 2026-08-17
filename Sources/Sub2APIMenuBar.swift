@@ -138,16 +138,32 @@ private final class AuthenticatedAPIClient {
     }
 
     func get(path: String, query: [URLQueryItem] = [], completion: @escaping (Result<Any, Error>) -> Void) {
+        request(method: "GET", path: path, query: query, body: nil, completion: completion)
+    }
+
+    func post(path: String, body: [String: Any], completion: @escaping (Result<Any, Error>) -> Void) {
+        request(method: "POST", path: path, query: [], body: body, completion: completion)
+    }
+
+    private func request(
+        method: String,
+        path: String,
+        query: [URLQueryItem],
+        body: [String: Any]?,
+        completion: @escaping (Result<Any, Error>) -> Void
+    ) {
         guard let token = tokens.load(site: site.name) else {
             completion(.failure(MonitorError.loginRequired(site.name)))
             return
         }
-        perform(path: path, query: query, token: token, retryAfterRefresh: true, completion: completion)
+        perform(method: method, path: path, query: query, body: body, token: token, retryAfterRefresh: true, completion: completion)
     }
 
     private func perform(
+        method: String,
         path: String,
         query: [URLQueryItem],
+        body: [String: Any]?,
         token: TokenRecord,
         retryAfterRefresh: Bool,
         completion: @escaping (Result<Any, Error>) -> Void
@@ -162,9 +178,14 @@ private final class AuthenticatedAPIClient {
             return
         }
         var request = URLRequest(url: url)
+        request.httpMethod = method
         request.timeoutInterval = timeout
         request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        }
         session.dataTask(with: request) { [weak self] data, response, error in
             if let error { completion(.failure(error)); return }
             guard let http = response as? HTTPURLResponse else {
@@ -175,7 +196,7 @@ private final class AuthenticatedAPIClient {
                 self?.refresh(refreshToken: refreshToken) { result in
                     switch result {
                     case .success(let refreshed):
-                        self?.perform(path: path, query: query, token: refreshed, retryAfterRefresh: false, completion: completion)
+                        self?.perform(method: method, path: path, query: query, body: body, token: refreshed, retryAfterRefresh: false, completion: completion)
                     case .failure(let error): completion(.failure(error))
                     }
                 }
@@ -336,6 +357,11 @@ private struct AccountSnapshot {
     let name: String
     let type: String
     let status: String
+    let schedulable: Bool
+    let concurrency: Int
+    let currentConcurrency: Int
+    let rateMultiplier: Double
+    let lastUsedAt: String?
     let remaining5h: Double?
     let remaining7d: Double?
 
@@ -344,6 +370,30 @@ private struct AccountSnapshot {
         let values = [remaining5h, remaining7d].compactMap { $0 }
         return values.min()
     }
+}
+
+private enum AccountMonitorState {
+    case notApplicable
+    case unavailable
+    case notLoggedIn
+    case skipped
+    case refreshing
+    case active
+    case failed(String)
+}
+
+private struct AccountMonitorSnapshot {
+    var state: AccountMonitorState
+    var balance: Double?
+    var key: ExternalKeySnapshot?
+    var channel: ChannelSnapshot?
+}
+
+private struct AccountListEntry {
+    let account: AccountSnapshot
+    let isCurrent: Bool
+    let monitor: AccountMonitorSnapshot
+    let isScheduleUpdating: Bool
 }
 
 private struct ChannelSnapshot {
@@ -368,6 +418,153 @@ private func formatRateMultiplier(_ value: Double) -> String {
     return text + "x"
 }
 
+private func formatCompactTimestamp(_ value: String) -> String {
+    let isoFormatter = ISO8601DateFormatter()
+    isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let date = isoFormatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    guard let date else {
+        return value.count > 19 ? String(value.prefix(19)).replacingOccurrences(of: "T", with: " ") : value
+    }
+    let displayFormatter = DateFormatter()
+    displayFormatter.locale = Locale(identifier: "zh_CN")
+    displayFormatter.dateFormat = "MM-dd HH:mm:ss"
+    return displayFormatter.string(from: date)
+}
+
+private class FlippedView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+private final class AccountRowView: FlippedView {
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let detailLabel = NSTextField(labelWithString: "")
+    private let metricLabel = NSTextField(labelWithString: "")
+    private let scheduleToggle = NSButton(checkboxWithTitle: "调度", target: nil, action: nil)
+    private let monitorButton = NSButton(title: "登录", target: nil, action: nil)
+    private let skipButton = NSButton(title: "跳过", target: nil, action: nil)
+    private let separator = NSBox()
+    private var accountID = 0
+    private var schedulable = false
+    var onSetSchedulable: ((Int, Bool) -> Void)?
+    var onLogin: ((Int) -> Void)?
+    var onSkip: ((Int, Bool) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        detailLabel.font = .systemFont(ofSize: 11)
+        detailLabel.textColor = .secondaryLabelColor
+        metricLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        metricLabel.textColor = .secondaryLabelColor
+        metricLabel.lineBreakMode = .byTruncatingTail
+        scheduleToggle.font = .systemFont(ofSize: 11)
+        scheduleToggle.toolTip = "是否参与 Sub2API 调度"
+        scheduleToggle.target = self
+        scheduleToggle.action = #selector(scheduleChanged)
+        monitorButton.bezelStyle = .inline
+        monitorButton.controlSize = .small
+        monitorButton.target = self
+        monitorButton.action = #selector(loginPressed)
+        skipButton.bezelStyle = .inline
+        skipButton.controlSize = .small
+        skipButton.target = self
+        skipButton.action = #selector(skipPressed)
+        separator.boxType = .separator
+        [titleLabel, detailLabel, metricLabel, scheduleToggle, monitorButton, skipButton, separator].forEach(addSubview)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        let rightWidth: CGFloat = 108
+        let textWidth = max(120, bounds.width - rightWidth - 18)
+        titleLabel.frame = NSRect(x: 8, y: 7, width: textWidth, height: 18)
+        detailLabel.frame = NSRect(x: 8, y: 27, width: textWidth, height: 16)
+        metricLabel.frame = NSRect(x: 8, y: 47, width: bounds.width - 16, height: 16)
+        scheduleToggle.frame = NSRect(x: bounds.width - rightWidth, y: 5, width: rightWidth, height: 20)
+        monitorButton.frame = NSRect(x: bounds.width - rightWidth, y: 28, width: 55, height: 20)
+        skipButton.frame = NSRect(x: bounds.width - 51, y: 28, width: 47, height: 20)
+        separator.frame = NSRect(x: 8, y: bounds.height - 1, width: bounds.width - 16, height: 1)
+    }
+
+    func configure(with entry: AccountListEntry) {
+        let account = entry.account
+        accountID = account.id
+        schedulable = account.schedulable
+        titleLabel.stringValue = (entry.isCurrent ? "● " : "") + account.name
+        titleLabel.textColor = entry.isCurrent ? .systemBlue : .labelColor
+        let type = account.isSubscription ? "OAuth" : "API Key"
+        detailLabel.stringValue = "\(type) · \(localizedAccountStatus(account.status)) · 并发 \(account.currentConcurrency)/\(account.concurrency)"
+        scheduleToggle.state = account.schedulable ? .on : .off
+        scheduleToggle.isEnabled = !entry.isScheduleUpdating
+        scheduleToggle.title = entry.isScheduleUpdating ? "更新中" : "调度"
+
+        if account.isSubscription {
+            let quota5h = account.remaining5h.map { String(format: "5h %.0f%%", $0) } ?? "5h --"
+            let quota7d = account.remaining7d.map { String(format: "7d %.0f%%", $0) } ?? "7d --"
+            metricLabel.stringValue = "\(quota5h) · \(quota7d)\(lastUsedText(account.lastUsedAt))"
+            monitorButton.isHidden = true
+            skipButton.isHidden = true
+            return
+        }
+
+        monitorButton.isHidden = false
+        switch entry.monitor.state {
+        case .notApplicable, .unavailable:
+            metricLabel.stringValue = "未发现第三方监控地址\(lastUsedText(account.lastUsedAt))"
+            monitorButton.isHidden = true
+            skipButton.isHidden = true
+        case .notLoggedIn:
+            metricLabel.stringValue = "未登录第三方监控\(lastUsedText(account.lastUsedAt))"
+            monitorButton.title = "登录"
+            skipButton.title = "跳过"
+            skipButton.isHidden = false
+        case .skipped:
+            metricLabel.stringValue = "已跳过第三方监控\(lastUsedText(account.lastUsedAt))"
+            monitorButton.title = "启用"
+            skipButton.isHidden = true
+        case .refreshing:
+            metricLabel.stringValue = "正在刷新第三方数据..."
+            monitorButton.title = "登录"
+            monitorButton.isEnabled = false
+            skipButton.isHidden = true
+        case .active:
+            let balance = entry.monitor.balance.map { String(format: "$%.2f", $0) } ?? "$--"
+            let multiplier = entry.monitor.key.map { formatRateMultiplier($0.rateMultiplier) } ?? "--x"
+            let ping = entry.monitor.channel?.pingMs.map { "PING \(Int($0))ms" } ?? "PING --"
+            let availability = entry.monitor.channel?.availability.map { String(format: "可用 %.1f%%", $0) } ?? "可用 --"
+            metricLabel.stringValue = "\(balance) · \(multiplier) · \(ping) · \(availability)"
+            monitorButton.title = "重登"
+            monitorButton.isEnabled = true
+            skipButton.title = "跳过"
+            skipButton.isHidden = false
+        case .failed(let message):
+            metricLabel.stringValue = message
+            monitorButton.title = "重登"
+            monitorButton.isEnabled = true
+            skipButton.title = "跳过"
+            skipButton.isHidden = false
+        }
+    }
+
+    private func localizedAccountStatus(_ status: String) -> String {
+        ["active": "正常", "inactive": "停用", "error": "异常", "paused": "暂停"][status.lowercased()] ?? status
+    }
+
+    private func lastUsedText(_ value: String?) -> String {
+        value.map { " · 最近 \(formatCompactTimestamp($0))" } ?? ""
+    }
+
+    @objc private func scheduleChanged() {
+        scheduleToggle.state = schedulable ? .on : .off
+        onSetSchedulable?(accountID, !schedulable)
+    }
+
+    @objc private func loginPressed() { onLogin?(accountID) }
+    @objc private func skipPressed() { onSkip?(accountID, true) }
+}
+
 private final class AIDashboardViewController: NSViewController {
     private let ttftValue = NSTextField(labelWithString: "--")
     private let usageDetail = NSTextField(labelWithString: "等待 Sub2API 登录")
@@ -377,16 +574,34 @@ private final class AIDashboardViewController: NSViewController {
     private let channelValue = NSTextField(labelWithString: "等待上游数据")
     private let updateValue = NSTextField(labelWithString: "尚未更新")
     private let recentStack = NSStackView()
+    private let tabControl = NSSegmentedControl(labels: ["概览", "上游"], trackingMode: .selectOne, target: nil, action: nil)
+    private let overviewView = NSView()
+    private let accountsView = NSView()
+    private let accountScroll = NSScrollView()
+    private let accountCountLabel = NSTextField(labelWithString: "上游账户")
     var onRefresh: (() -> Void)?
     var onLoginSub2API: (() -> Void)?
     var onLoginUpstream: (() -> Void)?
     var onOpenUsage: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onSetSchedulable: ((Int, Bool) -> Void)?
+    var onLoginAccount: ((Int) -> Void)?
+    var onSkipAccount: ((Int, Bool) -> Void)?
 
     override func loadView() {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 386))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 430))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        tabControl.frame = NSRect(x: 10, y: 397, width: 340, height: 24)
+        tabControl.selectedSegment = 0
+        tabControl.target = self
+        tabControl.action = #selector(tabChanged)
+        overviewView.frame = NSRect(x: 0, y: 36, width: 360, height: 355)
+        accountsView.frame = NSRect(x: 10, y: 38, width: 340, height: 351)
+        accountsView.isHidden = true
+        container.addSubview(tabControl)
+        container.addSubview(overviewView)
+        container.addSubview(accountsView)
 
         let title = NSTextField(labelWithString: "AI 延迟")
         title.font = .systemFont(ofSize: 16, weight: .semibold)
@@ -398,9 +613,9 @@ private final class AIDashboardViewController: NSViewController {
 
         let latencyBox = boxView()
         addViews([title, ttftValue, usageDetail], to: latencyBox)
-        title.frame = NSRect(x: 14, y: 108, width: 130, height: 22)
-        ttftValue.frame = NSRect(x: 14, y: 58, width: 272, height: 44)
-        usageDetail.frame = NSRect(x: 14, y: 12, width: 272, height: 40)
+        title.frame = NSRect(x: 14, y: 99, width: 150, height: 22)
+        ttftValue.frame = NSRect(x: 14, y: 49, width: 312, height: 44)
+        usageDetail.frame = NSRect(x: 14, y: 8, width: 312, height: 38)
 
         accountMetricTitle.font = .systemFont(ofSize: 13, weight: .medium)
         balanceValue.font = .monospacedDigitSystemFont(ofSize: 21, weight: .semibold)
@@ -414,13 +629,13 @@ private final class AIDashboardViewController: NSViewController {
         channelValue.textColor = .secondaryLabelColor
         let statusBox = boxView()
         addViews([accountMetricTitle, balanceValue, channelTitle, channelValue], to: statusBox)
-        accountMetricTitle.frame = NSRect(x: 14, y: 80, width: 136, height: 20)
-        balanceValue.frame = NSRect(x: 14, y: 19, width: 136, height: 54)
-        channelTitle.frame = NSRect(x: 158, y: 80, width: 128, height: 20)
+        accountMetricTitle.frame = NSRect(x: 14, y: 72, width: 156, height: 20)
+        balanceValue.frame = NSRect(x: 14, y: 15, width: 156, height: 52)
+        channelTitle.frame = NSRect(x: 178, y: 72, width: 148, height: 20)
         channelValue.lineBreakMode = .byWordWrapping
         channelValue.cell?.wraps = true
         channelValue.cell?.usesSingleLineMode = false
-        channelValue.frame = NSRect(x: 158, y: 11, width: 128, height: 64)
+        channelValue.frame = NSRect(x: 178, y: 7, width: 148, height: 62)
 
         let recentTitle = label("最近首字延迟", size: 13, weight: .medium)
         recentStack.orientation = .horizontal
@@ -428,16 +643,26 @@ private final class AIDashboardViewController: NSViewController {
         recentStack.spacing = 4
         let recentBox = boxView()
         addViews([recentTitle, recentStack], to: recentBox)
-        recentTitle.frame = NSRect(x: 14, y: 44, width: 130, height: 20)
-        recentStack.frame = NSRect(x: 12, y: 8, width: 276, height: 29)
+        recentTitle.frame = NSRect(x: 14, y: 40, width: 150, height: 20)
+        recentStack.frame = NSRect(x: 12, y: 6, width: 316, height: 28)
         setRecent([])
 
-        latencyBox.frame = NSRect(x: 10, y: 231, width: 300, height: 139)
-        statusBox.frame = NSRect(x: 10, y: 116, width: 300, height: 105)
-        recentBox.frame = NSRect(x: 10, y: 38, width: 300, height: 68)
-        container.addSubview(latencyBox)
-        container.addSubview(statusBox)
-        container.addSubview(recentBox)
+        latencyBox.frame = NSRect(x: 10, y: 213, width: 340, height: 129)
+        statusBox.frame = NSRect(x: 10, y: 106, width: 340, height: 97)
+        recentBox.frame = NSRect(x: 10, y: 33, width: 340, height: 63)
+        overviewView.addSubview(latencyBox)
+        overviewView.addSubview(statusBox)
+        overviewView.addSubview(recentBox)
+
+        accountCountLabel.frame = NSRect(x: 4, y: 325, width: 332, height: 20)
+        accountCountLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        accountScroll.frame = NSRect(x: 0, y: 0, width: 340, height: 319)
+        accountScroll.hasVerticalScroller = true
+        accountScroll.autohidesScrollers = true
+        accountScroll.borderType = .noBorder
+        accountScroll.drawsBackground = false
+        accountsView.addSubview(accountCountLabel)
+        accountsView.addSubview(accountScroll)
 
         let actions: [(String, String, Selector)] = [
             ("arrow.clockwise", "立即刷新", #selector(refreshPressed)),
@@ -454,7 +679,7 @@ private final class AIDashboardViewController: NSViewController {
             button.toolTip = action.1
             container.addSubview(button)
         }
-        updateValue.frame = NSRect(x: 188, y: 9, width: 122, height: 16)
+        updateValue.frame = NSRect(x: 228, y: 9, width: 122, height: 16)
         updateValue.alignment = .right
         updateValue.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         updateValue.textColor = .tertiaryLabelColor
@@ -462,11 +687,11 @@ private final class AIDashboardViewController: NSViewController {
         view = container
     }
 
-    func update(usage: UsageSnapshot?, account: AccountSnapshot?, balance: Double?, channel: ChannelSnapshot?, externalKey: ExternalKeySnapshot?, recent: [Double], updatedAt: Date?, error: String?) {
+    func update(usage: UsageSnapshot?, account: AccountSnapshot?, balance: Double?, channel: ChannelSnapshot?, externalKey: ExternalKeySnapshot?, recent: [Double], accounts: [AccountListEntry], updatedAt: Date?, error: String?) {
         if let usage {
             ttftValue.stringValue = formatDuration(usage.firstTokenMs)
             let total = usage.durationMs.map { " · 总 \(formatDuration($0))" } ?? ""
-            usageDetail.stringValue = "\(usage.account) · \(usage.model) · \(usage.group)\n\(formatUsageTimestamp(usage.createdAt))\(total)"
+            usageDetail.stringValue = "\(usage.account) · \(usage.model) · \(usage.group)\n\(formatCompactTimestamp(usage.createdAt))\(total)"
         }
         if let account, account.isSubscription {
             accountMetricTitle.stringValue = "\(account.name) 剩余额度"
@@ -484,9 +709,14 @@ private final class AIDashboardViewController: NSViewController {
             let group = externalKey?.group ?? "gpt"
             let multiplier = externalKey.map { " · \(formatRateMultiplier($0.rateMultiplier))" } ?? ""
             channelTitle.stringValue = group + multiplier
-            updateExternalChannel(channel, externalKey: externalKey)
+            if balance == nil, externalKey == nil, channel == nil {
+                channelValue.stringValue = "未登录第三方监控\n点击钥匙按钮登录"
+            } else {
+                updateExternalChannel(channel, externalKey: externalKey)
+            }
         }
         setRecent(recent)
+        updateAccounts(accounts)
         if let error { updateValue.stringValue = error }
         else if let updatedAt {
             let formatter = DateFormatter()
@@ -539,17 +769,21 @@ private final class AIDashboardViewController: NSViewController {
         milliseconds >= 1000 ? String(format: "%.2fs", milliseconds / 1000) : "\(Int(milliseconds))ms"
     }
 
-    private func formatUsageTimestamp(_ value: String) -> String {
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let date = isoFormatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
-        guard let date else {
-            return value.count > 19 ? String(value.prefix(19)).replacingOccurrences(of: "T", with: " ") : value
+    private func updateAccounts(_ entries: [AccountListEntry]) {
+        accountCountLabel.stringValue = "上游账户 · \(entries.count)"
+        let rowHeight: CGFloat = 68
+        let documentHeight = max(accountScroll.contentSize.height, CGFloat(entries.count) * rowHeight)
+        let document = FlippedView(frame: NSRect(x: 0, y: 0, width: accountScroll.contentSize.width, height: documentHeight))
+        for (index, entry) in entries.enumerated() {
+            let row = AccountRowView(frame: NSRect(x: 0, y: CGFloat(index) * rowHeight, width: document.bounds.width, height: rowHeight))
+            row.autoresizingMask = [.width]
+            row.onSetSchedulable = { [weak self] id, enabled in self?.onSetSchedulable?(id, enabled) }
+            row.onLogin = { [weak self] id in self?.onLoginAccount?(id) }
+            row.onSkip = { [weak self] id, skipped in self?.onSkipAccount?(id, skipped) }
+            row.configure(with: entry)
+            document.addSubview(row)
         }
-        let displayFormatter = DateFormatter()
-        displayFormatter.locale = Locale(identifier: "zh_CN")
-        displayFormatter.dateFormat = "MM-dd HH:mm:ss"
-        return displayFormatter.string(from: date)
+        accountScroll.documentView = document
     }
 
     private func boxView() -> NSView {
@@ -569,6 +803,11 @@ private final class AIDashboardViewController: NSViewController {
     }
 
     private func addViews(_ views: [NSView], to parent: NSView) { views.forEach(parent.addSubview) }
+    @objc private func tabChanged() {
+        let showsAccounts = tabControl.selectedSegment == 1
+        overviewView.isHidden = showsAccounts
+        accountsView.isHidden = !showsAccounts
+    }
     @objc private func refreshPressed() { onRefresh?() }
     @objc private func loginSubPressed() { onLoginSub2API?() }
     @objc private func loginUpstreamPressed() { onLoginUpstream?() }
@@ -583,8 +822,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let tokenStore = KeychainTokenStore()
     private var config: AIConfig?
     private var subClient: AuthenticatedAPIClient?
-    private var upstreamClient: AuthenticatedAPIClient?
-    private var activeUpstream: UpstreamConfig?
     private var timers: [Timer] = []
     private var clickMonitor: Any?
     private var loginWindows: [String: LoginWindowController] = [:]
@@ -593,11 +830,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var channel: ChannelSnapshot?
     private var externalKey: ExternalKeySnapshot?
     private var balance: Double?
+    private var accounts: [AccountSnapshot] = []
+    private var accountItems: [Int: [String: Any]] = [:]
+    private var upstreamsByAccountID: [Int: UpstreamConfig] = [:]
+    private var accountMonitors: [Int: AccountMonitorSnapshot] = [:]
+    private var scheduleUpdatesInFlight: Set<Int> = []
+    private var monitorQueue: [Int] = []
+    private var monitorRequestsInFlight: Set<Int> = []
     private var recentTTFT: [Double] = []
     private var updatedAt: Date?
     private var lastError: String?
     private var accountRequestInFlight = false
-    private var accountUpdatedAt: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -608,14 +851,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.sendAction(on: [.leftMouseDown])
         popover.behavior = .transient
         popover.animates = false
-        popover.contentSize = NSSize(width: 320, height: 386)
+        popover.contentSize = NSSize(width: 360, height: 430)
         popover.contentViewController = dashboard
         _ = dashboard.view
         dashboard.onRefresh = { [weak self] in self?.refreshAll() }
         dashboard.onLoginSub2API = { [weak self] in self?.showLogin(for: self?.config?.sub2api) }
-        dashboard.onLoginUpstream = { [weak self] in self?.showLogin(for: self?.activeUpstream?.site) }
+        dashboard.onLoginUpstream = { [weak self] in
+            guard let self, let accountID = self.usage?.accountID else { return }
+            self.loginToAccountMonitor(accountID: accountID)
+        }
         dashboard.onOpenUsage = { [weak self] in self?.openUsage() }
         dashboard.onQuit = { NSApp.terminate(nil) }
+        dashboard.onSetSchedulable = { [weak self] id, enabled in self?.requestSchedulableChange(accountID: id, enabled: enabled) }
+        dashboard.onLoginAccount = { [weak self] id in self?.loginToAccountMonitor(accountID: id) }
+        dashboard.onSkipAccount = { [weak self] id, skipped in self?.setAccountMonitorSkipped(accountID: id, skipped: skipped) }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             DispatchQueue.main.async { if self?.popover.isShown == true { self?.popover.performClose(nil) } }
         }
@@ -647,9 +896,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func scheduleTimers(_ config: AIConfig) {
         let definitions: [(Double, () -> Void)] = [
             (config.usageInterval, { [weak self] in self?.refreshUsage() }),
-            (config.channelInterval, { [weak self] in self?.refreshChannel() }),
-            (config.balanceInterval, { [weak self] in self?.refreshBalance() }),
-            (config.balanceInterval, { [weak self] in self?.refreshExternalKey() }),
+            (config.channelInterval, { [weak self] in self?.refreshAccounts() }),
+            (config.balanceInterval, { [weak self] in self?.refreshAccountMonitors() }),
         ]
         for (interval, action) in definitions {
             let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in action() }
@@ -660,9 +908,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshAll() {
         refreshUsage()
-        refreshChannel()
-        refreshBalance()
-        refreshExternalKey()
+        refreshAccounts()
     }
 
     private func refreshUsage() {
@@ -726,92 +972,303 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func refreshChannel() {
-        guard usesExternalRelay, let upstream = activeUpstream, let upstreamClient,
-              let channelGroup = externalKey?.group ?? upstream.channel_group else { return }
-        upstreamClient.get(path: "/api/v1/channel-monitors") { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                switch result {
-                case .success(let object):
-                    let items = self.items(from: object)
-                    guard let item = items.first(where: {
-                        let name = self.string($0, keys: ["name", "group_name", "group"])?.lowercased()
-                        return name == channelGroup.lowercased()
-                    }) else {
-                        self.showError("找不到渠道 \(channelGroup)")
-                        return
-                    }
-                    self.channel = ChannelSnapshot(
-                        name: self.string(item, keys: ["name", "group_name"]) ?? channelGroup,
-                        status: self.string(item, keys: ["status", "primary_status", "health_status"]) ?? "未知",
-                        latencyMs: self.number(item, keys: ["latency_ms", "primary_latency_ms", "dialog_latency_ms"]),
-                        pingMs: self.number(item, keys: ["primary_ping_latency_ms", "ping_latency_ms", "ping_ms", "endpoint_ping_ms", "endpoint_latency_ms"]),
-                        availability: self.number(item, keys: ["availability_7d", "availability", "success_rate"])
-                    )
-                    self.markUpdated()
-                case .failure(let error): self.showError(error.localizedDescription)
-                }
-            }
-        }
-    }
-
-    private func refreshBalance() {
-        guard usesExternalRelay else { return }
-        upstreamClient?.get(path: "/api/v1/auth/me") { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                switch result {
-                case .success(let object):
-                    guard let dictionary = object as? [String: Any],
-                          let value = self.number(dictionary, keys: ["balance"]) else {
-                        self.showError("余额响应无法解析")
-                        return
-                    }
-                    self.balance = value
-                    self.markUpdated()
-                case .failure(let error): self.showError(error.localizedDescription)
-                }
-            }
-        }
-    }
-
-    private func refreshExternalKey() {
-        guard usesExternalRelay, let upstream = activeUpstream, let upstreamClient else { return }
-        let keyName = upstream.key_name ?? usage?.account ?? upstream.name
+    private func refreshAccounts() {
+        guard !accountRequestInFlight, let subClient else { return }
+        accountRequestInFlight = true
         let query = [
             URLQueryItem(name: "page", value: "1"),
-            URLQueryItem(name: "page_size", value: "100"),
+            URLQueryItem(name: "page_size", value: "200"),
+            URLQueryItem(name: "sort_by", value: "name"),
+            URLQueryItem(name: "sort_order", value: "asc"),
         ]
-        upstreamClient.get(path: "/api/v1/keys", query: query) { [weak self] result in
+        subClient.get(path: "/api/v1/admin/accounts", query: query) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.accountRequestInFlight = false
                 switch result {
                 case .success(let object):
-                    guard let item = self.items(from: object).first(where: {
-                        let name = self.string($0, keys: ["name"])?.lowercased()
-                        return name == keyName.lowercased()
-                    }) else {
-                        self.showError("找不到同名上游密钥 \(keyName)")
-                        return
+                    let sourceItems = self.items(from: object)
+                    var snapshots: [AccountSnapshot] = []
+                    var rawItems: [Int: [String: Any]] = [:]
+                    var discoveredUpstreams: [Int: UpstreamConfig] = [:]
+                    for item in sourceItems {
+                        guard let snapshot = self.accountSnapshot(from: item) else { continue }
+                        snapshots.append(snapshot)
+                        rawItems[snapshot.id] = item
+                        if !snapshot.isSubscription, let upstream = self.upstreamConfig(for: snapshot, item: item) {
+                            discoveredUpstreams[snapshot.id] = upstream
+                        }
                     }
-                    guard let group = item["group"] as? [String: Any],
-                          let multiplier = self.number(group, keys: ["rate_multiplier"]) else {
-                        self.showError("同名密钥缺少分组或倍率")
-                        return
-                    }
-                    self.externalKey = ExternalKeySnapshot(
-                        name: self.string(item, keys: ["name"]) ?? keyName,
-                        group: self.string(group, keys: ["name"]) ?? upstream.channel_group ?? "--",
-                        rateMultiplier: multiplier,
-                        currentConcurrency: self.number(item, keys: ["current_concurrency"]).map(Int.init)
-                    )
+                    self.accounts = snapshots
+                    self.accountItems = rawItems
+                    self.upstreamsByAccountID = discoveredUpstreams
+                    self.reconcileAccountMonitorStates()
+                    self.syncCurrentAccountDetails()
                     self.markUpdated()
-                    self.refreshChannel()
-                case .failure(let error): self.showError(error.localizedDescription)
+                    self.refreshAccountMonitors()
+                case .failure(let error):
+                    self.showError(error.localizedDescription)
                 }
             }
         }
+    }
+
+    private func accountSnapshot(from item: [String: Any]) -> AccountSnapshot? {
+        guard let id = number(item, keys: ["id"]).map(Int.init) else { return nil }
+        let extra = item["extra"] as? [String: Any] ?? [:]
+        let used5h = number(extra, keys: ["codex_5h_used_percent", "codex_secondary_used_percent"])
+        let used7d = number(extra, keys: ["codex_7d_used_percent", "codex_primary_used_percent"])
+        return AccountSnapshot(
+            id: id,
+            name: string(item, keys: ["name"]) ?? "#\(id)",
+            type: string(item, keys: ["type"]) ?? "unknown",
+            status: string(item, keys: ["status"]) ?? "unknown",
+            schedulable: bool(item, keys: ["schedulable"]) ?? true,
+            concurrency: number(item, keys: ["concurrency"]).map(Int.init) ?? 0,
+            currentConcurrency: number(item, keys: ["current_concurrency"]).map(Int.init) ?? 0,
+            rateMultiplier: number(item, keys: ["rate_multiplier"]) ?? 1,
+            lastUsedAt: string(item, keys: ["last_used_at"]),
+            remaining5h: used5h.map { max(0, min(100, 100 - $0)) },
+            remaining7d: used7d.map { max(0, min(100, 100 - $0)) }
+        )
+    }
+
+    private func upstreamConfig(for account: AccountSnapshot, item: [String: Any]) -> UpstreamConfig? {
+        guard let config else { return nil }
+        return config.upstreamOverrides.first { $0.matches(accountName: account.name) }
+            ?? discoverUpstream(accountName: account.name, accountItem: item)
+    }
+
+    private func reconcileAccountMonitorStates() {
+        let validIDs = Set(accounts.map(\.id))
+        accountMonitors = accountMonitors.filter { validIDs.contains($0.key) }
+        for account in accounts {
+            if account.isSubscription {
+                accountMonitors[account.id] = AccountMonitorSnapshot(state: .notApplicable, balance: nil, key: nil, channel: nil)
+            } else if upstreamsByAccountID[account.id] == nil {
+                accountMonitors[account.id] = AccountMonitorSnapshot(state: .unavailable, balance: nil, key: nil, channel: nil)
+            } else if isAccountMonitorSkipped(accountID: account.id) {
+                accountMonitors[account.id] = AccountMonitorSnapshot(state: .skipped, balance: nil, key: nil, channel: nil)
+            } else if let upstream = upstreamsByAccountID[account.id], tokenStore.load(site: upstream.site.name) == nil {
+                accountMonitors[account.id] = AccountMonitorSnapshot(state: .notLoggedIn, balance: nil, key: nil, channel: nil)
+            } else if accountMonitors[account.id] == nil {
+                accountMonitors[account.id] = AccountMonitorSnapshot(state: .refreshing, balance: nil, key: nil, channel: nil)
+            }
+        }
+    }
+
+    private func refreshAccountMonitors() {
+        for account in accounts where !account.isSubscription {
+            guard let upstream = upstreamsByAccountID[account.id],
+                  !isAccountMonitorSkipped(accountID: account.id),
+                  tokenStore.load(site: upstream.site.name) != nil,
+                  !monitorRequestsInFlight.contains(account.id),
+                  !monitorQueue.contains(account.id) else { continue }
+            accountMonitors[account.id] = AccountMonitorSnapshot(
+                state: .refreshing,
+                balance: accountMonitors[account.id]?.balance,
+                key: accountMonitors[account.id]?.key,
+                channel: accountMonitors[account.id]?.channel
+            )
+            monitorQueue.append(account.id)
+        }
+        updateUI()
+        pumpMonitorQueue()
+    }
+
+    private func pumpMonitorQueue() {
+        while monitorRequestsInFlight.count < 3, !monitorQueue.isEmpty {
+            let accountID = monitorQueue.removeFirst()
+            guard !isAccountMonitorSkipped(accountID: accountID) else { continue }
+            monitorRequestsInFlight.insert(accountID)
+            refreshMonitor(accountID: accountID)
+        }
+    }
+
+    private func refreshMonitor(accountID: Int) {
+        guard let upstream = upstreamsByAccountID[accountID],
+              let account = accounts.first(where: { $0.id == accountID }),
+              let config else {
+            finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("缺少中转配置")))
+            return
+        }
+        let client = AuthenticatedAPIClient(site: upstream.site, timeout: config.httpTimeout, tokens: tokenStore)
+        client.get(path: "/api/v1/auth/me") { [weak self] balanceResult in
+            guard let self else { return }
+            switch balanceResult {
+            case .failure(let error):
+                self.finishMonitorRefresh(accountID: accountID, result: .failure(error))
+            case .success(let balanceObject):
+                guard let balanceData = balanceObject as? [String: Any],
+                      let balance = self.number(balanceData, keys: ["balance"]) else {
+                    self.finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("余额响应无法解析")))
+                    return
+                }
+                let query = [URLQueryItem(name: "page", value: "1"), URLQueryItem(name: "page_size", value: "100")]
+                client.get(path: "/api/v1/keys", query: query) { [weak self] keyResult in
+                    guard let self else { return }
+                    switch keyResult {
+                    case .failure(let error):
+                        self.finishMonitorRefresh(accountID: accountID, result: .failure(error))
+                    case .success(let keyObject):
+                        let keyName = upstream.key_name ?? account.name
+                        guard let item = self.items(from: keyObject).first(where: {
+                            self.string($0, keys: ["name"])?.caseInsensitiveCompare(keyName) == .orderedSame
+                        }), let group = item["group"] as? [String: Any],
+                           let multiplier = self.number(group, keys: ["rate_multiplier"]) else {
+                            self.finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("找不到同名密钥或分组")))
+                            return
+                        }
+                        let key = ExternalKeySnapshot(
+                            name: self.string(item, keys: ["name"]) ?? keyName,
+                            group: self.string(group, keys: ["name"]) ?? upstream.channel_group ?? "--",
+                            rateMultiplier: multiplier,
+                            currentConcurrency: self.number(item, keys: ["current_concurrency"]).map(Int.init)
+                        )
+                        client.get(path: "/api/v1/channel-monitors") { [weak self] channelResult in
+                            guard let self else { return }
+                            switch channelResult {
+                            case .failure(let error):
+                                self.finishMonitorRefresh(accountID: accountID, result: .failure(error))
+                            case .success(let channelObject):
+                                guard let channelItem = self.items(from: channelObject).first(where: {
+                                    self.string($0, keys: ["name", "group_name", "group"])?.caseInsensitiveCompare(key.group) == .orderedSame
+                                }) else {
+                                    self.finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("找不到渠道 \(key.group)")))
+                                    return
+                                }
+                                let channel = ChannelSnapshot(
+                                    name: self.string(channelItem, keys: ["name", "group_name"]) ?? key.group,
+                                    status: self.string(channelItem, keys: ["status", "primary_status", "health_status"]) ?? "unknown",
+                                    latencyMs: self.number(channelItem, keys: ["latency_ms", "primary_latency_ms", "dialog_latency_ms"]),
+                                    pingMs: self.number(channelItem, keys: ["primary_ping_latency_ms", "ping_latency_ms", "ping_ms", "endpoint_ping_ms", "endpoint_latency_ms"]),
+                                    availability: self.number(channelItem, keys: ["availability_7d", "availability", "success_rate"])
+                                )
+                                self.finishMonitorRefresh(
+                                    accountID: accountID,
+                                    result: .success(AccountMonitorSnapshot(state: .active, balance: balance, key: key, channel: channel))
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func finishMonitorRefresh(accountID: Int, result: Result<AccountMonitorSnapshot, Error>) {
+        DispatchQueue.main.async {
+            self.monitorRequestsInFlight.remove(accountID)
+            if self.isAccountMonitorSkipped(accountID: accountID) {
+                self.accountMonitors[accountID] = AccountMonitorSnapshot(state: .skipped, balance: nil, key: nil, channel: nil)
+            } else {
+                switch result {
+                case .success(let snapshot):
+                    self.accountMonitors[accountID] = snapshot
+                case .failure(let error):
+                    let previous = self.accountMonitors[accountID]
+                    self.accountMonitors[accountID] = AccountMonitorSnapshot(
+                        state: error is MonitorError ? .failed(error.localizedDescription) : .failed("监控失败：\(error.localizedDescription)"),
+                        balance: previous?.balance,
+                        key: previous?.key,
+                        channel: previous?.channel
+                    )
+                }
+            }
+            self.syncCurrentAccountDetails()
+            self.updateUI()
+            self.pumpMonitorQueue()
+        }
+    }
+
+    private func syncCurrentAccountDetails() {
+        guard let usage, let current = accounts.first(where: { $0.id == usage.accountID }) else { return }
+        account = current
+        let monitor = accountMonitors[current.id]
+        balance = monitor?.balance
+        externalKey = monitor?.key
+        channel = monitor?.channel
+    }
+
+    private func monitorPreferenceKey(accountID: Int) -> String {
+        "\(config?.sub2api.base_url ?? "")#\(accountID)"
+    }
+
+    private func isAccountMonitorSkipped(accountID: Int) -> Bool {
+        let values = UserDefaults.standard.stringArray(forKey: "skippedUpstreamMonitors") ?? []
+        return values.contains(monitorPreferenceKey(accountID: accountID))
+    }
+
+    private func setAccountMonitorSkipped(accountID: Int, skipped: Bool) {
+        var values = Set(UserDefaults.standard.stringArray(forKey: "skippedUpstreamMonitors") ?? [])
+        let key = monitorPreferenceKey(accountID: accountID)
+        if skipped { values.insert(key) } else { values.remove(key) }
+        UserDefaults.standard.set(Array(values).sorted(), forKey: "skippedUpstreamMonitors")
+        monitorQueue.removeAll { $0 == accountID }
+        accountMonitors[accountID] = AccountMonitorSnapshot(
+            state: skipped ? .skipped : .notLoggedIn,
+            balance: nil,
+            key: nil,
+            channel: nil
+        )
+        syncCurrentAccountDetails()
+        updateUI()
+    }
+
+    private func loginToAccountMonitor(accountID: Int) {
+        guard let upstream = upstreamsByAccountID[accountID] else { return }
+        if isAccountMonitorSkipped(accountID: accountID) {
+            setAccountMonitorSkipped(accountID: accountID, skipped: false)
+            if tokenStore.load(site: upstream.site.name) != nil {
+                refreshAccountMonitors()
+                return
+            }
+        }
+        showLogin(for: upstream.site)
+    }
+
+    private func requestSchedulableChange(accountID: Int, enabled: Bool) {
+        guard let target = accounts.first(where: { $0.id == accountID }), let subClient else { return }
+        if !enabled && accounts.filter({ $0.id != accountID && $0.schedulable }).isEmpty {
+            presentAlert(title: "无法暂停调度", message: "至少需要保留一个上游账户参与调度。")
+            return
+        }
+        if !enabled, usage?.accountID == accountID {
+            let alert = NSAlert()
+            alert.messageText = "暂停当前使用账户？"
+            alert.informativeText = "\(target.name) 是最近请求实际使用的账户。暂停后，后续请求将切换到其他可调度账户。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "暂停调度")
+            alert.addButton(withTitle: "取消")
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        scheduleUpdatesInFlight.insert(accountID)
+        updateUI()
+        subClient.post(path: "/api/v1/admin/accounts/\(accountID)/schedulable", body: ["schedulable": enabled]) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.scheduleUpdatesInFlight.remove(accountID)
+                switch result {
+                case .success:
+                    self.refreshAccounts()
+                case .failure(let error):
+                    self.showError("调度更新失败：\(error.localizedDescription)")
+                    self.presentAlert(title: "调度状态未修改", message: error.localizedDescription)
+                }
+                self.updateUI()
+            }
+        }
+    }
+
+    private func presentAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     private func matchesUsage(_ item: [String: Any], config: AIConfig) -> Bool {
@@ -828,26 +1285,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let group = nestedString(item, paths: [["group", "name"], ["group_name"]])
         guard let trackedGroup = config.tracked_group, !trackedGroup.isEmpty else { return true }
         return group == nil || group?.caseInsensitiveCompare(trackedGroup) == .orderedSame
-    }
-
-    private var usesExternalRelay: Bool {
-        guard let account, !account.isSubscription else { return false }
-        return activeUpstream?.matches(accountName: account.name) == true
-    }
-
-    private func configureUpstream(for accountName: String, accountItem: [String: Any]? = nil) {
-        guard let config else { return }
-        let override = config.upstreamOverrides.first { $0.matches(accountName: accountName) }
-        let discovered = accountItem.flatMap { discoverUpstream(accountName: accountName, accountItem: $0) }
-        let next = override ?? discovered
-        guard next?.name != activeUpstream?.name || next?.base_url != activeUpstream?.base_url else { return }
-        activeUpstream = next
-        upstreamClient = next.map {
-            AuthenticatedAPIClient(site: $0.site, timeout: config.httpTimeout, tokens: tokenStore)
-        }
-        balance = nil
-        channel = nil
-        externalKey = nil
     }
 
     private func discoverUpstream(accountName: String, accountItem: [String: Any]) -> UpstreamConfig? {
@@ -875,59 +1312,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshAccountIfNeeded(id: Int) {
-        let isFresh = account?.id == id
-            && accountUpdatedAt.map { Date().timeIntervalSince($0) < 30 } == true
-        guard !isFresh, !accountRequestInFlight, let subClient else { return }
-        accountRequestInFlight = true
-        let query = [
-            URLQueryItem(name: "page", value: "1"),
-            URLQueryItem(name: "page_size", value: "100"),
-        ]
-        subClient.get(path: "/api/v1/admin/accounts", query: query) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.accountRequestInFlight = false
-                switch result {
-                case .success(let object):
-                    guard let item = self.items(from: object).first(where: {
-                        self.number($0, keys: ["id"]).map(Int.init) == id
-                    }) else {
-                        self.showError("找不到上游账户 #\(id)")
-                        return
-                    }
-                    let extra = item["extra"] as? [String: Any] ?? [:]
-                    let used5h = self.number(extra, keys: ["codex_5h_used_percent", "codex_secondary_used_percent"])
-                    let used7d = self.number(extra, keys: ["codex_7d_used_percent", "codex_primary_used_percent"])
-                    self.account = AccountSnapshot(
-                        id: id,
-                        name: self.string(item, keys: ["name"]) ?? "#\(id)",
-                        type: self.string(item, keys: ["type"]) ?? "unknown",
-                        status: self.string(item, keys: ["status"]) ?? "unknown",
-                        remaining5h: used5h.map { max(0, min(100, 100 - $0)) },
-                        remaining7d: used7d.map { max(0, min(100, 100 - $0)) }
-                    )
-                    self.accountUpdatedAt = Date()
-                    if let accountName = self.account?.name {
-                        self.configureUpstream(for: accountName, accountItem: item)
-                    }
-                    if self.account?.isSubscription == false {
-                        guard let site = self.activeUpstream?.site else {
-                            self.showError("账户缺少可用的 credentials.base_url")
-                            return
-                        }
-                        if self.tokenStore.load(site: site.name) == nil {
-                            self.showLogin(for: site)
-                            self.markUpdated()
-                            return
-                        }
-                        self.refreshBalance()
-                        self.refreshExternalKey()
-                    }
-                    self.markUpdated()
-                case .failure(let error): self.showError(error.localizedDescription)
-                }
-            }
+        guard accounts.first(where: { $0.id == id }) == nil else {
+            syncCurrentAccountDetails()
+            updateUI()
+            return
         }
+        refreshAccounts()
     }
 
     private func items(from object: Any) -> [[String: Any]] {
@@ -949,6 +1339,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func number(_ dictionary: [String: Any], keys: [String]) -> Double? {
         for key in keys { if let value = AuthenticatedAPIClient.double(dictionary[key]) { return value } }
+        return nil
+    }
+
+    private func bool(_ dictionary: [String: Any], keys: [String]) -> Bool? {
+        for key in keys {
+            if let value = dictionary[key] as? Bool { return value }
+            if let value = dictionary[key] as? NSNumber { return value.boolValue }
+            if let value = dictionary[key] as? String {
+                if ["true", "1", "yes"].contains(value.lowercased()) { return true }
+                if ["false", "0", "no"].contains(value.lowercased()) { return false }
+            }
+        }
         return nil
     }
 
@@ -995,7 +1397,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.title = lastError == nil ? "AI --" : "AI !"
             statusItem.button?.toolTip = lastError ?? "等待 AI 延迟数据"
         }
-        dashboard.update(usage: usage, account: account, balance: balance, channel: channel, externalKey: externalKey, recent: recentTTFT, updatedAt: updatedAt, error: lastError)
+        let entries = accounts.map { account in
+            AccountListEntry(
+                account: account,
+                isCurrent: usage?.accountID == account.id,
+                monitor: accountMonitors[account.id] ?? AccountMonitorSnapshot(state: .unavailable, balance: nil, key: nil, channel: nil),
+                isScheduleUpdating: scheduleUpdatesInFlight.contains(account.id)
+            )
+        }
+        dashboard.update(usage: usage, account: account, balance: balance, channel: channel, externalKey: externalKey, recent: recentTTFT, accounts: entries, updatedAt: updatedAt, error: lastError)
     }
 
     private func showLogin(for site: SiteConfig?) {
@@ -1005,6 +1415,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = LoginWindowController(site: site, tokenStore: tokenStore)
         controller.onLogin = { [weak self] in
             self?.refreshAll()
+            self?.refreshAccountMonitors()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self?.showFirstMissingLogin()
             }

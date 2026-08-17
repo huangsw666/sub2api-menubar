@@ -21,10 +21,15 @@ you change routing in Sub2API.
 - Optional relay balance, group multiplier, current concurrency, channel
   latency, PING, and 7-day availability
 - The five most recent TTFT samples
+- A separate upstream-account view with scheduling state and per-account health
+- On-demand third-party relay login; unneeded or retired relays can be skipped
+- Enable or pause Sub2API account scheduling from the account list
 
-The app is read-only. It does not change Sub2API routing or account state.
-Tokens captured after web login are stored in macOS Keychain, not in the JSON
-configuration.
+The app does not change routing automatically. Scheduling changes are explicit
+per-account actions, while third-party relay monitoring is opt-in. A skipped
+relay is not queried and does not affect whether Sub2API can route to that
+account. Tokens captured after web login are stored in macOS Keychain, not in
+the JSON configuration.
 
 ## Screenshots
 
@@ -81,7 +86,9 @@ launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
 
 Click `AI --` in the menu bar and use the key button to sign in to Sub2API.
 The login page must store `auth_token` (and optionally `refresh_token`) in
-browser local storage, as current Sub2API releases do.
+browser local storage, as current Sub2API releases do. Third-party relay
+logins are optional: open the `上游` view and click `登录` only for relays you
+want to monitor.
 
 ## Configuration
 
@@ -119,8 +126,10 @@ an API key account, the app automatically:
 For example, a Sub2API account named `callai` must have an API key named
 `callai` on the third-party relay. Matching is case-insensitive, but otherwise
 exact: if no same-name key exists, the app reports the mismatch instead of
-guessing another key. On first use, the app asks you to sign in to the
-discovered monitoring site and stores its token in macOS Keychain.
+guessing another key. The app does not automatically open the relay login.
+Choose `登录` for a specific account, or `跳过` to permanently suppress
+monitoring for that account on this Mac. Skipping keeps the account visible
+but performs no relay API requests.
 
 <table>
   <tr>
@@ -141,6 +150,14 @@ The relay is expected to expose:
 
 Responses may be arrays or common paginated objects using `items`, `records`,
 `list`, or `monitors`.
+
+### Account scheduling
+
+The `上游` view lists every account returned by `GET /api/v1/admin/accounts`.
+The `调度` switch calls `POST /api/v1/admin/accounts/:id/schedulable` with a
+single `schedulable` boolean. Disabling the account currently handling the
+latest request requires confirmation, and the app refuses to disable the last
+remaining schedulable account.
 
 ### Optional relay overrides
 
