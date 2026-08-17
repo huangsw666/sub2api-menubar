@@ -24,6 +24,17 @@ The app is read-only. It does not change Sub2API routing or account state.
 Tokens captured after web login are stored in macOS Keychain, not in the JSON
 configuration.
 
+## Screenshot
+
+### OAuth subscription
+
+The menu bar shows the latest TTFT and remaining quota. Click it to inspect the
+active account, 5-hour and 7-day quota windows, and recent latency samples.
+
+<p align="center">
+  <img src="docs/images/oauth-subscription.png" alt="Sub2API Menu Bar showing an OAuth subscription account" width="360">
+</p>
+
 ## Requirements
 
 - macOS 13 or newer
