@@ -21,7 +21,7 @@ you change routing in Sub2API.
 - Optional relay balance, group multiplier, current concurrency, channel
   latency, PING, and 7-day availability
 - The five most recent TTFT samples
-- A separate upstream-account view with scheduling state and per-account health
+- A single scrollable overview with scheduling state and per-account health
 - On-demand third-party relay login; unneeded or retired relays can be skipped
 - Enable or pause Sub2API account scheduling from the account list
 
@@ -87,8 +87,8 @@ launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
 Click `AI --` in the menu bar and use the key button to sign in to Sub2API.
 The login page must store `auth_token` (and optionally `refresh_token`) in
 browser local storage, as current Sub2API releases do. Third-party relay
-logins are optional: open the `上游` view and click `登录` only for relays you
-want to monitor.
+logins are optional: scroll to the upstream-account list and click `登录` only
+for relays you want to monitor.
 
 ## Configuration
 
@@ -153,7 +153,9 @@ Responses may be arrays or common paginated objects using `items`, `records`,
 
 ### Account scheduling
 
-The `上游` view lists every account returned by `GET /api/v1/admin/accounts`.
+The upstream section lists every account returned by `GET /api/v1/admin/accounts`.
+Schedulable accounts are always sorted before paused accounts; within each
+group, the account used by the latest request appears first.
 The `调度` switch calls `POST /api/v1/admin/accounts/:id/schedulable` with a
 single `schedulable` boolean. Disabling the account currently handling the
 latest request requires confirmation, and the app refuses to disable the last

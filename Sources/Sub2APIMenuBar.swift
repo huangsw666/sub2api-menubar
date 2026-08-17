@@ -574,11 +574,12 @@ private final class AIDashboardViewController: NSViewController {
     private let channelValue = NSTextField(labelWithString: "等待上游数据")
     private let updateValue = NSTextField(labelWithString: "尚未更新")
     private let recentStack = NSStackView()
-    private let tabControl = NSSegmentedControl(labels: ["概览", "上游"], trackingMode: .selectOne, target: nil, action: nil)
+    private let contentScroll = NSScrollView()
+    private let contentDocument = FlippedView()
     private let overviewView = NSView()
-    private let accountsView = NSView()
-    private let accountScroll = NSScrollView()
+    private let accountListView = FlippedView()
     private let accountCountLabel = NSTextField(labelWithString: "上游账户")
+    private var accountRows: [AccountRowView] = []
     var onRefresh: (() -> Void)?
     var onLoginSub2API: (() -> Void)?
     var onLoginUpstream: (() -> Void)?
@@ -592,16 +593,18 @@ private final class AIDashboardViewController: NSViewController {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 430))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        tabControl.frame = NSRect(x: 10, y: 397, width: 340, height: 24)
-        tabControl.selectedSegment = 0
-        tabControl.target = self
-        tabControl.action = #selector(tabChanged)
-        overviewView.frame = NSRect(x: 0, y: 36, width: 360, height: 355)
-        accountsView.frame = NSRect(x: 10, y: 38, width: 340, height: 351)
-        accountsView.isHidden = true
-        container.addSubview(tabControl)
-        container.addSubview(overviewView)
-        container.addSubview(accountsView)
+        contentScroll.frame = NSRect(x: 0, y: 38, width: 360, height: 392)
+        contentScroll.hasVerticalScroller = true
+        contentScroll.autohidesScrollers = true
+        contentScroll.borderType = .noBorder
+        contentScroll.drawsBackground = false
+        contentScroll.documentView = contentDocument
+        contentDocument.frame = NSRect(x: 0, y: 0, width: 360, height: 390)
+        overviewView.frame = NSRect(x: 0, y: 0, width: 360, height: 355)
+        accountListView.frame = NSRect(x: 10, y: 355, width: 340, height: 35)
+        contentDocument.addSubview(overviewView)
+        contentDocument.addSubview(accountListView)
+        container.addSubview(contentScroll)
 
         let title = NSTextField(labelWithString: "AI 延迟")
         title.font = .systemFont(ofSize: 16, weight: .semibold)
@@ -654,15 +657,9 @@ private final class AIDashboardViewController: NSViewController {
         overviewView.addSubview(statusBox)
         overviewView.addSubview(recentBox)
 
-        accountCountLabel.frame = NSRect(x: 4, y: 325, width: 332, height: 20)
+        accountCountLabel.frame = NSRect(x: 4, y: 6, width: 332, height: 20)
         accountCountLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        accountScroll.frame = NSRect(x: 0, y: 0, width: 340, height: 319)
-        accountScroll.hasVerticalScroller = true
-        accountScroll.autohidesScrollers = true
-        accountScroll.borderType = .noBorder
-        accountScroll.drawsBackground = false
-        accountsView.addSubview(accountCountLabel)
-        accountsView.addSubview(accountScroll)
+        accountListView.addSubview(accountCountLabel)
 
         let actions: [(String, String, Selector)] = [
             ("arrow.clockwise", "立即刷新", #selector(refreshPressed)),
@@ -772,18 +769,26 @@ private final class AIDashboardViewController: NSViewController {
     private func updateAccounts(_ entries: [AccountListEntry]) {
         accountCountLabel.stringValue = "上游账户 · \(entries.count)"
         let rowHeight: CGFloat = 68
-        let documentHeight = max(accountScroll.contentSize.height, CGFloat(entries.count) * rowHeight)
-        let document = FlippedView(frame: NSRect(x: 0, y: 0, width: accountScroll.contentSize.width, height: documentHeight))
+        let previousOrigin = contentScroll.contentView.bounds.origin
+        accountRows.forEach { $0.removeFromSuperview() }
+        accountRows.removeAll()
+        let listHeight = 32 + CGFloat(entries.count) * rowHeight
+        accountListView.frame = NSRect(x: 10, y: 355, width: 340, height: listHeight)
+        contentDocument.frame = NSRect(x: 0, y: 0, width: 360, height: 355 + listHeight + 10)
         for (index, entry) in entries.enumerated() {
-            let row = AccountRowView(frame: NSRect(x: 0, y: CGFloat(index) * rowHeight, width: document.bounds.width, height: rowHeight))
+            let row = AccountRowView(frame: NSRect(x: 0, y: 32 + CGFloat(index) * rowHeight, width: 340, height: rowHeight))
             row.autoresizingMask = [.width]
             row.onSetSchedulable = { [weak self] id, enabled in self?.onSetSchedulable?(id, enabled) }
             row.onLogin = { [weak self] id in self?.onLoginAccount?(id) }
             row.onSkip = { [weak self] id, skipped in self?.onSkipAccount?(id, skipped) }
             row.configure(with: entry)
-            document.addSubview(row)
+            accountListView.addSubview(row)
+            accountRows.append(row)
         }
-        accountScroll.documentView = document
+        contentDocument.layoutSubtreeIfNeeded()
+        let maxY = max(0, contentDocument.bounds.height - contentScroll.contentView.bounds.height)
+        contentScroll.contentView.scroll(to: NSPoint(x: 0, y: min(previousOrigin.y, maxY)))
+        contentScroll.reflectScrolledClipView(contentScroll.contentView)
     }
 
     private func boxView() -> NSView {
@@ -803,11 +808,6 @@ private final class AIDashboardViewController: NSViewController {
     }
 
     private func addViews(_ views: [NSView], to parent: NSView) { views.forEach(parent.addSubview) }
-    @objc private func tabChanged() {
-        let showsAccounts = tabControl.selectedSegment == 1
-        overviewView.isHidden = showsAccounts
-        accountsView.isHidden = !showsAccounts
-    }
     @objc private func refreshPressed() { onRefresh?() }
     @objc private func loginSubPressed() { onLoginSub2API?() }
     @objc private func loginUpstreamPressed() { onLoginUpstream?() }
@@ -1391,13 +1391,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 accountMetric = ""
             }
             let multiplier = externalKey.map { " \(formatRateMultiplier($0.rateMultiplier))" } ?? ""
-            statusItem.button?.title = latency + accountMetric + multiplier
-            statusItem.button?.toolTip = "\(usage.account) · \(usage.model) · 首字延迟 \(Int(usage.firstTokenMs))ms"
+            statusItem.button?.title = latency
+            statusItem.button?.toolTip = "\(usage.account) · \(usage.model) · 首字延迟 \(Int(usage.firstTokenMs))ms\(accountMetric)\(multiplier)"
         } else {
             statusItem.button?.title = lastError == nil ? "AI --" : "AI !"
             statusItem.button?.toolTip = lastError ?? "等待 AI 延迟数据"
         }
-        let entries = accounts.map { account in
+        let sortedAccounts = accounts.sorted { lhs, rhs in
+            if lhs.schedulable != rhs.schedulable { return lhs.schedulable }
+            let lhsIsCurrent = usage?.accountID == lhs.id
+            let rhsIsCurrent = usage?.accountID == rhs.id
+            if lhsIsCurrent != rhsIsCurrent { return lhsIsCurrent }
+            let nameOrder = lhs.name.localizedStandardCompare(rhs.name)
+            return nameOrder == .orderedSame ? lhs.id < rhs.id : nameOrder == .orderedAscending
+        }
+        let entries = sortedAccounts.map { account in
             AccountListEntry(
                 account: account,
                 isCurrent: usage?.accountID == account.id,

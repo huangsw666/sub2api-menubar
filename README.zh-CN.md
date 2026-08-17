@@ -19,7 +19,7 @@ macOS 菜单栏监控工具。
 - 显示 OAuth 订阅的 5 小时和 7 天剩余额度
 - 显示第三方中转余额、分组倍率、当前并发、渠道延迟、PING 和 7 天可用性
 - 显示最近 5 次首字延迟
-- 在独立的“上游”页面显示全部账户、调度状态和逐账户健康状态
+- 在单一可滚动概览中显示全部账户、调度状态和逐账户健康状态
 - 第三方中转按需登录，不需要的或已经失效的中转可以跳过
 - 直接在账户列表中启用或暂停 Sub2API 账户调度
 
@@ -82,7 +82,7 @@ launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
 
 点击菜单栏的 `AI --`，使用钥匙图标登录 Sub2API。登录页面需要像当前 Sub2API
 版本一样，将 `auth_token` 和可选的 `refresh_token` 保存在浏览器 localStorage
-中。第三方中转登录不是必需的：打开“上游”页面，只为需要监控的中转点击“登录”。
+中。第三方中转登录不是必需的：向下滚动到账户列表，只为需要监控的中转点击“登录”。
 
 ## 配置
 
@@ -145,7 +145,8 @@ launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
 
 ### 账户调度
 
-“上游”页面会列出 `GET /api/v1/admin/accounts` 返回的全部账户。每个账户的“调度”
+概览中的上游区域会列出 `GET /api/v1/admin/accounts` 返回的全部账户。参与调度的账户
+始终排在暂停调度的账户前面；同一组内，最近请求实际使用的账户优先显示。每个账户的“调度”
 开关调用 `POST /api/v1/admin/accounts/:id/schedulable`，只提交一个
 `schedulable` 布尔值。暂停最近请求正在使用的账户时需要确认；应用也不会允许暂停最后一个
 仍参与调度的账户。

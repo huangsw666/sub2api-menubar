@@ -6,7 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- Dedicated upstream-account view with OAuth quota and API key relay summaries
+- Single scrollable overview with OAuth quota and API key relay summaries
 - Per-account scheduling switch backed by the Sub2API schedulable API
 - Confirmation before pausing the account used by the latest request
 - Protection against disabling the last schedulable account
@@ -16,7 +16,8 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Third-party relay login is no longer opened automatically
-- Popover now separates the latency overview from the upstream account list
+- Schedulable accounts are sorted before paused accounts
+- Menu bar text is compact so it is less likely to be hidden on crowded displays
 
 ## [0.1.2] - 2026-08-17
 

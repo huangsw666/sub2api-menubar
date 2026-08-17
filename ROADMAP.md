@@ -4,7 +4,7 @@ This roadmap is directional. Issue feedback will determine the order.
 
 ## v0.2.0 (implemented)
 
-- Show all Sub2API upstream accounts in a dedicated popover view
+- Show all Sub2API upstream accounts in one scrollable overview
 - Display balance, quota, availability, latency, concurrency, and scheduling state per row
 - Make third-party relay login opt-in, with persistent per-account skip state
 - Enable or pause an account in Sub2API directly from the menu bar
