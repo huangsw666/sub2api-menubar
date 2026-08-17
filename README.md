@@ -1,5 +1,7 @@
 # Sub2API Menu Bar
 
+English | [简体中文](README.zh-CN.md)
+
 A small native macOS menu bar monitor for a self-hosted
 [Sub2API](https://github.com/Wei-Shaw/sub2api) gateway.
 
