@@ -3,6 +3,7 @@
 __pycache__/
 *.py[cod]
 DerivedData/
+dist/
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 config.json

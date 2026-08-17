@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.1] - 2026-08-17
+
+### Added
+
+- Universal Apple Silicon and Intel release package
+- Precompiled app installation without Xcode
+- Automatic configuration and Keychain token migration from the original local prototype
+- SHA-256 checksum for release downloads
+
 ## [0.1.0] - 2026-08-17
 
 ### Added

@@ -27,11 +27,20 @@ configuration.
 ## Requirements
 
 - macOS 13 or newer
-- Apple Command Line Tools (`xcode-select --install`)
 - A reachable, self-hosted Sub2API instance
 - An administrator account that can read usage and upstream-account data
 
 ## Install
+
+Download the universal macOS ZIP from the
+[latest release](https://github.com/huangsw666/sub2api-menubar/releases/latest),
+extract it, then open `install.command`. The app is ad-hoc signed but not yet
+notarized, so macOS may require Control-clicking the command and choosing Open.
+After that explicit approval, the installer removes the quarantine attribute
+from only the installed app bundle so its LaunchAgent can start it.
+
+The package supports both Apple Silicon and Intel Macs and does not require
+Xcode. To build from source instead, install Apple Command Line Tools and run:
 
 ```bash
 git clone https://github.com/huangsw666/sub2api-menubar.git
@@ -113,12 +122,23 @@ Responses may be arrays or common paginated objects using `items`, `records`,
 Uninstalling removes only the LaunchAgent. The compiled app, configuration,
 and Keychain tokens are retained so a reinstall does not destroy local data.
 
+The release installer migrates configuration from the original
+`local.ai-latency-monitor` prototype. The app then imports matching legacy
+Keychain tokens through the native Security API on first use; macOS may ask
+you to confirm access once.
+
 ## Build directly
 
 ```bash
 xcrun swiftc -swift-version 5 \
   -framework AppKit -framework WebKit -framework Security \
   Sources/Sub2APIMenuBar.swift -o Sub2APIMenuBar
+```
+
+Build the universal release ZIP and SHA-256 checksum with:
+
+```bash
+./scripts/build-release.sh
 ```
 
 ## Project status
