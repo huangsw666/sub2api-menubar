@@ -1,0 +1,12 @@
+{
+  "sub2api_base_url": "https://sub2api.example.com",
+  "sub2api_login_path": "/login",
+  "tracked_user_id": null,
+  "tracked_api_key_id": null,
+  "tracked_group": null,
+  "upstreams": [],
+  "usage_interval_seconds": 10,
+  "channel_interval_seconds": 30,
+  "balance_interval_seconds": 60,
+  "http_timeout_seconds": 8
+}

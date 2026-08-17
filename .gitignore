@@ -1,0 +1,9 @@
+.DS_Store
+.build/
+__pycache__/
+*.py[cod]
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+config.json
+*.log
