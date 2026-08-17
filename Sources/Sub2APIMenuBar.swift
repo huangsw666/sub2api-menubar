@@ -384,57 +384,57 @@ private final class AIDashboardViewController: NSViewController {
     var onQuit: (() -> Void)?
 
     override func loadView() {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 360))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 386))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
         let title = NSTextField(labelWithString: "AI 延迟")
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
-        ttftValue.font = .monospacedDigitSystemFont(ofSize: 32, weight: .semibold)
+        title.font = .systemFont(ofSize: 16, weight: .semibold)
+        ttftValue.font = .monospacedDigitSystemFont(ofSize: 34, weight: .semibold)
         ttftValue.textColor = .systemBlue
-        usageDetail.font = .systemFont(ofSize: 11)
+        usageDetail.font = .systemFont(ofSize: 12)
         usageDetail.textColor = .secondaryLabelColor
         usageDetail.maximumNumberOfLines = 2
 
         let latencyBox = boxView()
         addViews([title, ttftValue, usageDetail], to: latencyBox)
-        title.frame = NSRect(x: 12, y: 102, width: 120, height: 20)
-        ttftValue.frame = NSRect(x: 12, y: 55, width: 250, height: 42)
-        usageDetail.frame = NSRect(x: 12, y: 12, width: 252, height: 36)
+        title.frame = NSRect(x: 14, y: 108, width: 130, height: 22)
+        ttftValue.frame = NSRect(x: 14, y: 58, width: 272, height: 44)
+        usageDetail.frame = NSRect(x: 14, y: 12, width: 272, height: 40)
 
-        accountMetricTitle.font = .systemFont(ofSize: 12, weight: .medium)
-        balanceValue.font = .monospacedDigitSystemFont(ofSize: 20, weight: .semibold)
+        accountMetricTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        balanceValue.font = .monospacedDigitSystemFont(ofSize: 21, weight: .semibold)
         balanceValue.maximumNumberOfLines = 2
         balanceValue.lineBreakMode = .byWordWrapping
         balanceValue.cell?.wraps = true
         balanceValue.cell?.usesSingleLineMode = false
-        channelTitle.font = .systemFont(ofSize: 12, weight: .medium)
-        channelValue.font = .systemFont(ofSize: 11)
+        channelTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        channelValue.font = .systemFont(ofSize: 12)
         channelValue.maximumNumberOfLines = 3
         channelValue.textColor = .secondaryLabelColor
         let statusBox = boxView()
         addViews([accountMetricTitle, balanceValue, channelTitle, channelValue], to: statusBox)
-        accountMetricTitle.frame = NSRect(x: 12, y: 76, width: 125, height: 18)
-        balanceValue.frame = NSRect(x: 12, y: 19, width: 120, height: 50)
-        channelTitle.frame = NSRect(x: 145, y: 76, width: 110, height: 18)
+        accountMetricTitle.frame = NSRect(x: 14, y: 80, width: 136, height: 20)
+        balanceValue.frame = NSRect(x: 14, y: 19, width: 136, height: 54)
+        channelTitle.frame = NSRect(x: 158, y: 80, width: 128, height: 20)
         channelValue.lineBreakMode = .byWordWrapping
         channelValue.cell?.wraps = true
         channelValue.cell?.usesSingleLineMode = false
-        channelValue.frame = NSRect(x: 145, y: 11, width: 125, height: 62)
+        channelValue.frame = NSRect(x: 158, y: 11, width: 128, height: 64)
 
-        let recentTitle = label("最近首字延迟", size: 12, weight: .medium)
+        let recentTitle = label("最近首字延迟", size: 13, weight: .medium)
         recentStack.orientation = .horizontal
         recentStack.distribution = .fillEqually
         recentStack.spacing = 4
         let recentBox = boxView()
         addViews([recentTitle, recentStack], to: recentBox)
-        recentTitle.frame = NSRect(x: 12, y: 51, width: 120, height: 18)
-        recentStack.frame = NSRect(x: 10, y: 11, width: 260, height: 30)
+        recentTitle.frame = NSRect(x: 14, y: 44, width: 130, height: 20)
+        recentStack.frame = NSRect(x: 12, y: 8, width: 276, height: 29)
         setRecent([])
 
-        latencyBox.frame = NSRect(x: 10, y: 210, width: 280, height: 134)
-        statusBox.frame = NSRect(x: 10, y: 103, width: 280, height: 97)
-        recentBox.frame = NSRect(x: 10, y: 31, width: 280, height: 62)
+        latencyBox.frame = NSRect(x: 10, y: 231, width: 300, height: 139)
+        statusBox.frame = NSRect(x: 10, y: 116, width: 300, height: 105)
+        recentBox.frame = NSRect(x: 10, y: 38, width: 300, height: 68)
         container.addSubview(latencyBox)
         container.addSubview(statusBox)
         container.addSubview(recentBox)
@@ -449,14 +449,14 @@ private final class AIDashboardViewController: NSViewController {
         for (index, action) in actions.enumerated() {
             let image = NSImage(systemSymbolName: action.0, accessibilityDescription: action.1) ?? NSImage()
             let button = NSButton(image: image, target: self, action: action.2)
-            button.frame = NSRect(x: 10 + CGFloat(index) * 32, y: 2, width: 28, height: 26)
+            button.frame = NSRect(x: 10 + CGFloat(index) * 34, y: 4, width: 30, height: 28)
             button.isBordered = false
             button.toolTip = action.1
             container.addSubview(button)
         }
-        updateValue.frame = NSRect(x: 172, y: 7, width: 118, height: 16)
+        updateValue.frame = NSRect(x: 188, y: 9, width: 122, height: 16)
         updateValue.alignment = .right
-        updateValue.font = .systemFont(ofSize: 9)
+        updateValue.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         updateValue.textColor = .tertiaryLabelColor
         container.addSubview(updateValue)
         view = container
@@ -466,11 +466,11 @@ private final class AIDashboardViewController: NSViewController {
         if let usage {
             ttftValue.stringValue = formatDuration(usage.firstTokenMs)
             let total = usage.durationMs.map { " · 总 \(formatDuration($0))" } ?? ""
-            usageDetail.stringValue = "\(usage.account) · \(usage.model) · \(usage.group)\n\(usage.createdAt)\(total)"
+            usageDetail.stringValue = "\(usage.account) · \(usage.model) · \(usage.group)\n\(formatUsageTimestamp(usage.createdAt))\(total)"
         }
         if let account, account.isSubscription {
             accountMetricTitle.stringValue = "\(account.name) 剩余额度"
-            balanceValue.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+            balanceValue.font = .monospacedDigitSystemFont(ofSize: 16, weight: .semibold)
             let remaining5h = account.remaining5h.map { String(format: "5h %.0f%%", $0) } ?? "5h --"
             let remaining7d = account.remaining7d.map { String(format: "7d %.0f%%", $0) } ?? "7d --"
             balanceValue.stringValue = "\(remaining5h)\n\(remaining7d)"
@@ -479,7 +479,7 @@ private final class AIDashboardViewController: NSViewController {
             channelValue.stringValue = "\(status)\nOAuth 订阅\n#\(account.id)"
         } else {
             accountMetricTitle.stringValue = "\(account?.name ?? "上游") 余额"
-            balanceValue.font = .monospacedDigitSystemFont(ofSize: 20, weight: .semibold)
+            balanceValue.font = .monospacedDigitSystemFont(ofSize: 21, weight: .semibold)
             balanceValue.stringValue = balance.map { String(format: "$%.2f", $0) } ?? "--"
             let group = externalKey?.group ?? "gpt"
             let multiplier = externalKey.map { " · \(formatRateMultiplier($0.rateMultiplier))" } ?? ""
@@ -527,7 +527,7 @@ private final class AIDashboardViewController: NSViewController {
             let text = index < shown.count ? formatDuration(shown[index]) : "--"
             let field = NSTextField(labelWithString: text)
             field.alignment = .center
-            field.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+            field.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
             field.wantsLayer = true
             field.layer?.cornerRadius = 4
             field.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
@@ -537,6 +537,19 @@ private final class AIDashboardViewController: NSViewController {
 
     private func formatDuration(_ milliseconds: Double) -> String {
         milliseconds >= 1000 ? String(format: "%.2fs", milliseconds / 1000) : "\(Int(milliseconds))ms"
+    }
+
+    private func formatUsageTimestamp(_ value: String) -> String {
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let date = isoFormatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+        guard let date else {
+            return value.count > 19 ? String(value.prefix(19)).replacingOccurrences(of: "T", with: " ") : value
+        }
+        let displayFormatter = DateFormatter()
+        displayFormatter.locale = Locale(identifier: "zh_CN")
+        displayFormatter.dateFormat = "MM-dd HH:mm:ss"
+        return displayFormatter.string(from: date)
     }
 
     private func boxView() -> NSView {
@@ -595,7 +608,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.sendAction(on: [.leftMouseDown])
         popover.behavior = .transient
         popover.animates = false
-        popover.contentSize = NSSize(width: 300, height: 360)
+        popover.contentSize = NSSize(width: 320, height: 386)
         popover.contentViewController = dashboard
         _ = dashboard.view
         dashboard.onRefresh = { [weak self] in self?.refreshAll() }
