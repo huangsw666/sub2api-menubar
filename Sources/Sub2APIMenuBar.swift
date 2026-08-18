@@ -265,15 +265,30 @@ extension AuthenticatedAPIClient: APIClient {}
 
 private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
     private let site: SiteConfig
-    private let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+    private let timeout: Double
+    private let webView: WKWebView
+    private let hostWindow: NSWindow
     private var ready = false
     private var loading = false
     private var pending: [(String, [URLQueryItem], (Result<Any, Error>) -> Void)] = []
 
     init(site: SiteConfig, timeout: Double) {
         self.site = site
+        self.timeout = timeout
+        webView = WKWebView(
+            frame: NSRect(x: 0, y: 0, width: 1, height: 1),
+            configuration: WKWebViewConfiguration()
+        )
+        hostWindow = NSWindow(
+            contentRect: NSRect(x: -10_000, y: -10_000, width: 1, height: 1),
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
         super.init()
         webView.navigationDelegate = self
+        hostWindow.contentView = webView
+        hostWindow.isReleasedWhenClosed = false
     }
 
     func start() {
@@ -284,6 +299,15 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
             return
         }
         webView.load(URLRequest(url: url))
+        DispatchQueue.main.asyncAfter(deadline: .now() + min(3, timeout)) { [weak self] in
+            guard let self, !self.ready else { return }
+            if self.webView.url?.host?.caseInsensitiveCompare(url.host ?? "") == .orderedSame {
+                self.markReady()
+            } else {
+                self.loading = false
+                self.failPending(MonitorError.invalidResponse("\(self.site.name) 页面加载超时"))
+            }
+        }
     }
 
     func get(path: String, query: [URLQueryItem] = [], completion: @escaping (Result<Any, Error>) -> Void) {
@@ -295,7 +319,26 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
         request(path: path, query: query, completion: completion)
     }
 
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        markReady()
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        markReady()
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        loading = false
+        failPending(error)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        loading = false
+        failPending(error)
+    }
+
+    private func markReady() {
+        guard !ready else { return }
         ready = true
         let requests = pending
         pending.removeAll()
@@ -327,6 +370,15 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
         });
         return { status: response.status, body: await response.text() };
         """
+        var completed = false
+        let finish: (Result<Any, Error>) -> Void = { result in
+            guard !completed else { return }
+            completed = true
+            completion(result)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+            finish(.failure(MonitorError.invalidResponse("\(self.site.name) 请求超时")))
+        }
         webView.callAsyncJavaScript(
             script,
             arguments: ["url": url.absoluteString],
@@ -335,31 +387,31 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
         ) { result in
             switch result {
             case .failure(let error):
-                completion(.failure(error))
+                finish(.failure(error))
                 return
             case .success(let value):
                 guard let payload = value as? [String: Any],
                       let status = (payload["status"] as? NSNumber)?.intValue,
                       let body = payload["body"] as? String else {
-                    completion(.failure(MonitorError.invalidResponse("接口响应无法读取")))
+                    finish(.failure(MonitorError.invalidResponse("接口响应无法读取")))
                     return
                 }
                 guard (200..<300).contains(status) else {
                     if status == 401 {
-                        completion(.failure(MonitorError.loginRequired(self.site.name)))
+                        finish(.failure(MonitorError.loginRequired(self.site.name)))
                     } else {
-                        completion(.failure(MonitorError.http(status)))
+                        finish(.failure(MonitorError.http(status)))
                     }
                     return
                 }
                 guard let data = body.data(using: .utf8) else {
-                    completion(.failure(MonitorError.invalidResponse("接口响应不是 UTF-8")))
+                    finish(.failure(MonitorError.invalidResponse("接口响应不是 UTF-8")))
                     return
                 }
                 do {
-                    completion(.success(AuthenticatedAPIClient.unwrap(try JSONSerialization.jsonObject(with: data))))
+                    finish(.success(AuthenticatedAPIClient.unwrap(try JSONSerialization.jsonObject(with: data))))
                 } catch {
-                    completion(.failure(error))
+                    finish(.failure(error))
                 }
             }
         }
