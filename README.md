@@ -22,6 +22,8 @@ you change routing in Sub2API.
   latency, PING, and 7-day availability
 - The five most recent TTFT samples
 - Overall and per-upstream cache hit rate for a recent configurable window
+- A compact menu bar summary with TTFT, cache hit rate, relay balance, and
+  group multiplier
 - A single scrollable overview with scheduling state and per-account health
 - On-demand third-party relay login; unneeded or retired relays can be skipped
 - Enable or pause Sub2API account scheduling from the account list
@@ -39,14 +41,24 @@ The menu bar adapts to the account type selected by Sub2API. OAuth accounts
 show remaining subscription quota, while API key relays show balance,
 multiplier, concurrency, PING, and availability.
 
+### Menu bar summary
+
+The status item keeps the latest TTFT, three-hour cache hit rate, relay
+balance, and group multiplier visible without opening the overview.
+
+<p align="center">
+  <img src="docs/images/menu-bar-status-latest.png" alt="Sub2API Menu Bar status item showing TTFT, cache hit rate, relay balance, and multiplier" width="362">
+</p>
+
 ### v0.2.0 upstream account management
 
 The single scrollable overview shows the current request, recent TTFT samples,
-all upstream accounts, scheduling switches, quota, relay health, and selective
-third-party monitoring login in one place.
+the three-hour overall and per-upstream cache hit rates, all upstream accounts,
+scheduling switches, quota, relay health, and selective third-party monitoring
+login in one place.
 
 <p align="center">
-  <img src="docs/images/upstream-account-management.png" alt="Sub2API Menu Bar v0.2.0 upstream account management overview" width="386">
+  <img src="docs/images/overview-v0.2.0-latest.png" alt="Sub2API Menu Bar v0.2.0 overview showing cache hit rate and upstream account health" width="386">
 </p>
 
 ### Account-type details
