@@ -21,6 +21,7 @@ you change routing in Sub2API.
 - Optional relay balance, group multiplier, current concurrency, channel
   latency, PING, and 7-day availability
 - The five most recent TTFT samples
+- Overall and per-upstream cache hit rate for a recent configurable window
 - A single scrollable overview with scheduling state and per-account health
 - On-demand third-party relay login; unneeded or retired relays can be skipped
 - Enable or pause Sub2API account scheduling from the account list
@@ -28,8 +29,9 @@ you change routing in Sub2API.
 The app does not change routing automatically. Scheduling changes are explicit
 per-account actions, while third-party relay monitoring is opt-in. A skipped
 relay is not queried and does not affect whether Sub2API can route to that
-account. Tokens captured after web login are stored in macOS Keychain, not in
-the JSON configuration.
+account. Tokens captured after web login are stored in a permissions-restricted
+local credentials file, separate from the JSON configuration. This avoids
+Keychain permission prompts when the ad-hoc-signed app is upgraded.
 
 ## Screenshots
 
@@ -114,6 +116,7 @@ The minimal configuration monitors the latest matching Sub2API request:
   "tracked_api_key_id": null,
   "tracked_group": null,
   "usage_interval_seconds": 10,
+  "cache_window_minutes": 180,
   "channel_interval_seconds": 30,
   "balance_interval_seconds": 60,
   "http_timeout_seconds": 8
@@ -122,6 +125,9 @@ The minimal configuration monitors the latest matching Sub2API request:
 
 Set any tracking field to narrow the usage query. Leave it `null` to accept
 the latest usage record visible to the signed-in administrator.
+`cache_window_minutes` controls the recent window used for the overall and
+per-upstream cache hit-rate summaries; it defaults to 180 minutes (3 hours)
+and is clamped to 1-1440 minutes.
 
 ### Automatic API key relay discovery
 
@@ -202,18 +208,18 @@ case-insensitive.
 ```
 
 Uninstalling removes only the LaunchAgent. The compiled app, configuration,
-and Keychain tokens are retained so a reinstall does not destroy local data.
+and local credentials file are retained so a reinstall does not destroy local
+data.
 
 The release installer migrates configuration from the original
-`local.ai-latency-monitor` prototype. The app then imports matching legacy
-Keychain tokens through the native Security API on first use; macOS may ask
-you to confirm access once.
+`local.ai-latency-monitor` prototype. Existing web-login sessions are restored
+silently from the app's WebKit website data on first use.
 
 ## Build directly
 
 ```bash
 xcrun swiftc -swift-version 5 \
-  -framework AppKit -framework WebKit -framework Security \
+  -framework AppKit -framework WebKit \
   Sources/Sub2APIMenuBar.swift -o Sub2APIMenuBar
 ```
 

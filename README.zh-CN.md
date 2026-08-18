@@ -19,13 +19,15 @@ macOS 菜单栏监控工具。
 - 显示 OAuth 订阅的 5 小时和 7 天剩余额度
 - 显示第三方中转余额、分组倍率、当前并发、渠道延迟、PING 和 7 天可用性
 - 显示最近 5 次首字延迟
+- 显示最近时间窗口内的整体和逐上游缓存命中率
 - 在单一可滚动概览中显示全部账户、调度状态和逐账户健康状态
 - 第三方中转按需登录，不需要的或已经失效的中转可以跳过
 - 直接在账户列表中启用或暂停 Sub2API 账户调度
 
 应用不会自动修改路由。调度状态必须由用户逐账户明确操作；第三方中转监控默认
 按需启用。跳过某个中转只会停止监控请求，不会改变 Sub2API 是否可以路由到该账户。
-网页登录取得的访问令牌保存在 macOS 钥匙串中，不会写入 JSON 配置文件。
+网页登录取得的访问令牌保存在单独的本地凭据文件中，文件权限受限且不会写入
+JSON 配置文件。这样 ad-hoc 签名的 App 升级时不会反复请求钥匙串权限。
 
 ## 界面截图
 
@@ -107,6 +109,7 @@ launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
   "tracked_api_key_id": null,
   "tracked_group": null,
   "usage_interval_seconds": 10,
+  "cache_window_minutes": 180,
   "channel_interval_seconds": 30,
   "balance_interval_seconds": 60,
   "http_timeout_seconds": 8
@@ -115,6 +118,8 @@ launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
 
 可以设置 `tracked_user_id`、`tracked_api_key_id` 或 `tracked_group` 来缩小
 使用记录的匹配范围；保持为 `null` 时，接受当前管理员能够看到的最新记录。
+`cache_window_minutes` 控制整体及逐上游缓存命中率的最近统计窗口，默认 180 分钟（3 小时），
+有效范围为 1 到 1440 分钟。
 
 ### 自动发现 API Key 第三方中转
 
@@ -188,18 +193,17 @@ launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
 ./scripts/uninstall.sh
 ```
 
-卸载脚本只停止并删除 LaunchAgent，保留已编译的 App、配置文件和钥匙串令牌，
+卸载脚本只停止并删除 LaunchAgent，保留已编译的 App、配置文件和本地凭据文件，
 因此重新安装不会破坏本地数据。
 
 Release 安装器可以迁移早期 `local.ai-latency-monitor` 原型的配置。应用首次
-使用时会通过原生 Security API 导入匹配的旧钥匙串令牌；macOS 可能要求确认
-一次钥匙串访问权限。
+使用时会从自身已有的 WebKit 登录数据中静默恢复会话。
 
 ## 从源码构建
 
 ```bash
 xcrun swiftc -swift-version 5 \
-  -framework AppKit -framework WebKit -framework Security \
+  -framework AppKit -framework WebKit \
   Sources/Sub2APIMenuBar.swift -o Sub2APIMenuBar
 ```
 

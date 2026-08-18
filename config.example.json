@@ -5,6 +5,7 @@
   "tracked_api_key_id": null,
   "tracked_group": null,
   "usage_interval_seconds": 10,
+  "cache_window_minutes": 180,
   "channel_interval_seconds": 30,
   "balance_interval_seconds": 60,
   "http_timeout_seconds": 8

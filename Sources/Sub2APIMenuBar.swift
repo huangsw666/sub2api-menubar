@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import Security
 import WebKit
 
 private struct SiteConfig {
@@ -34,6 +33,7 @@ private struct AIConfig: Decodable {
     let tracked_group: String?
     let upstreams: [UpstreamConfig]?
     let usage_interval_seconds: Double?
+    let cache_window_minutes: Double?
     let channel_interval_seconds: Double?
     let balance_interval_seconds: Double?
     let http_timeout_seconds: Double?
@@ -43,6 +43,7 @@ private struct AIConfig: Decodable {
     }
 
     var usageInterval: Double { max(3, usage_interval_seconds ?? 10) }
+    var cacheWindowMinutes: Double { min(1440, max(1, cache_window_minutes ?? 180)) }
     var channelInterval: Double { max(10, channel_interval_seconds ?? 30) }
     var balanceInterval: Double { max(10, balance_interval_seconds ?? 60) }
     var httpTimeout: Double { max(2, http_timeout_seconds ?? 8) }
@@ -69,65 +70,47 @@ private enum MonitorError: LocalizedError {
     }
 }
 
-private final class KeychainTokenStore {
-    private let service = "io.github.huangsw666.sub2api-menubar"
-    private let legacyService = "local.ai-latency-monitor"
+private final class TokenStore {
+    private let fileURL: URL
+    private let lock = NSLock()
 
-    func load(site: String) -> TokenRecord? {
-        if let token = load(site: site, service: service) {
-            return token
-        }
-        guard let token = load(site: site, service: legacyService) else {
-            return nil
-        }
-        try? save(token, site: site)
-        return token
+    init() {
+        let supportDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Sub2APIMenuBar", isDirectory: true)
+        fileURL = supportDirectory.appendingPathComponent("credentials.json")
     }
 
-    private func load(site: String, service: String) -> TokenRecord? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: site,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return try? JSONDecoder().decode(TokenRecord.self, from: data)
+    func load(site: String) -> TokenRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        return loadAll()[site]
     }
 
     func save(_ token: TokenRecord, site: String) throws {
-        let data = try JSONEncoder().encode(token)
-        let identity: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: site,
-        ]
-        let changes: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(identity as CFDictionary, changes as CFDictionary)
-        if status == errSecItemNotFound {
-            var newItem = identity
-            newItem[kSecValueData as String] = data
-            newItem[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            let addStatus = SecItemAdd(newItem as CFDictionary, nil)
-            guard addStatus == errSecSuccess else {
-                throw NSError(domain: NSOSStatusErrorDomain, code: Int(addStatus))
-            }
-        } else if status != errSecSuccess {
-            throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
-        }
+        lock.lock()
+        defer { lock.unlock() }
+        var tokens = loadAll()
+        tokens[site] = token
+        let directory = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(tokens)
+        try data.write(to: fileURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+    }
+
+    private func loadAll() -> [String: TokenRecord] {
+        guard let data = try? Data(contentsOf: fileURL) else { return [:] }
+        return (try? JSONDecoder().decode([String: TokenRecord].self, from: data)) ?? [:]
     }
 }
 
 private final class AuthenticatedAPIClient {
     private let site: SiteConfig
     private let timeout: Double
-    private let tokens: KeychainTokenStore
+    private let tokens: TokenStore
     private let session: URLSession
 
-    init(site: SiteConfig, timeout: Double, tokens: KeychainTokenStore) {
+    init(site: SiteConfig, timeout: Double, tokens: TokenStore) {
         self.site = site
         self.timeout = timeout
         self.tokens = tokens
@@ -182,6 +165,8 @@ private final class AuthenticatedAPIClient {
         request.timeoutInterval = timeout
         request.setValue("Bearer \(token.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("1", forHTTPHeaderField: "X-User-UI-Request")
+        request.setValue("zh-CN", forHTTPHeaderField: "Accept-Language")
         if let body {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -266,16 +251,189 @@ private final class AuthenticatedAPIClient {
     }
 }
 
+private protocol APIClient {
+    func get(path: String, query: [URLQueryItem], completion: @escaping (Result<Any, Error>) -> Void)
+}
+
+private extension APIClient {
+    func get(path: String, completion: @escaping (Result<Any, Error>) -> Void) {
+        get(path: path, query: [], completion: completion)
+    }
+}
+
+extension AuthenticatedAPIClient: APIClient {}
+
+private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
+    private let site: SiteConfig
+    private let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+    private var ready = false
+    private var loading = false
+    private var pending: [(String, [URLQueryItem], (Result<Any, Error>) -> Void)] = []
+
+    init(site: SiteConfig, timeout: Double) {
+        self.site = site
+        super.init()
+        webView.navigationDelegate = self
+    }
+
+    func start() {
+        guard !loading else { return }
+        loading = true
+        guard let url = URL(string: site.base_url + site.login_path) else {
+            failPending(MonitorError.invalidResponse("无效接口地址"))
+            return
+        }
+        webView.load(URLRequest(url: url))
+    }
+
+    func get(path: String, query: [URLQueryItem] = [], completion: @escaping (Result<Any, Error>) -> Void) {
+        if !ready {
+            pending.append((path, query, completion))
+            start()
+            return
+        }
+        request(path: path, query: query, completion: completion)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        ready = true
+        let requests = pending
+        pending.removeAll()
+        for (path, query, completion) in requests {
+            request(path: path, query: query, completion: completion)
+        }
+    }
+
+    private func request(path: String, query: [URLQueryItem], completion: @escaping (Result<Any, Error>) -> Void) {
+        guard var components = URLComponents(string: site.base_url + path) else {
+            completion(.failure(MonitorError.invalidResponse("无效接口地址")))
+            return
+        }
+        components.queryItems = query.isEmpty ? nil : query
+        guard let url = components.url else {
+            completion(.failure(MonitorError.invalidResponse("无效接口地址")))
+            return
+        }
+        let script = """
+        const response = await fetch(url, {
+          method: 'GET',
+          credentials: 'include',
+          headers: {
+            'Authorization': 'Bearer ' + String(localStorage.getItem('auth_token') || '').replace(/^Bearer\\s+/i, ''),
+            'Accept': 'application/json',
+            'X-User-UI-Request': '1',
+            'Accept-Language': 'zh-CN'
+          }
+        });
+        return { status: response.status, body: await response.text() };
+        """
+        webView.callAsyncJavaScript(
+            script,
+            arguments: ["url": url.absoluteString],
+            in: nil,
+            in: WKContentWorld.page
+        ) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+                return
+            case .success(let value):
+                guard let payload = value as? [String: Any],
+                      let status = (payload["status"] as? NSNumber)?.intValue,
+                      let body = payload["body"] as? String else {
+                    completion(.failure(MonitorError.invalidResponse("接口响应无法读取")))
+                    return
+                }
+                guard (200..<300).contains(status) else {
+                    if status == 401 {
+                        completion(.failure(MonitorError.loginRequired(self.site.name)))
+                    } else {
+                        completion(.failure(MonitorError.http(status)))
+                    }
+                    return
+                }
+                guard let data = body.data(using: .utf8) else {
+                    completion(.failure(MonitorError.invalidResponse("接口响应不是 UTF-8")))
+                    return
+                }
+                do {
+                    completion(.success(AuthenticatedAPIClient.unwrap(try JSONSerialization.jsonObject(with: data))))
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func failPending(_ error: Error) {
+        let requests = pending
+        pending.removeAll()
+        for (_, _, completion) in requests { completion(.failure(error)) }
+    }
+}
+
+private let tokenCaptureScript = """
+function normalizeToken(value) {
+  if (!value) return null;
+  let text = String(value).trim();
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed === 'string') text = parsed.trim();
+    else if (parsed && typeof parsed === 'object') {
+      text = String(parsed.access_token || parsed.accessToken || parsed.token || parsed.value || '').trim();
+    }
+  } catch (_) {}
+  return text.replace(/^Bearer\\s+/i, '').trim() || null;
+}
+function readStorage(keys) {
+  for (const key of keys) {
+    try {
+      const local = localStorage.getItem(key);
+      if (local) return local;
+    } catch (_) {}
+    try {
+      const session = sessionStorage.getItem(key);
+      if (session) return session;
+    } catch (_) {}
+  }
+  return null;
+}
+JSON.stringify({
+  accessToken: normalizeToken(readStorage(['auth_token', 'access_token', 'accessToken', 'token'])),
+  refreshToken: normalizeToken(readStorage(['refresh_token', 'refreshToken'])),
+  expiresAt: readStorage(['token_expires_at', 'expires_at', 'expiresAt'])
+})
+"""
+
+private func decodedToken(from result: Any?) -> TokenRecord? {
+    guard let json = result as? String,
+          let data = json.data(using: .utf8),
+          let values = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let access = values["accessToken"] as? String, !access.isEmpty else { return nil }
+    let expiresAt: Double?
+    if let value = values["expiresAt"] as? String,
+       let timestamp = Double(value) {
+        expiresAt = timestamp > 10_000_000_000 ? timestamp / 1000 : timestamp
+    } else {
+        expiresAt = nil
+    }
+    return TokenRecord(
+        accessToken: access,
+        refreshToken: values["refreshToken"] as? String,
+        expiresAt: expiresAt
+    )
+}
+
 private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWindowDelegate {
     private let site: SiteConfig
-    private let tokenStore: KeychainTokenStore
+    private let tokenStore: TokenStore
     private let webView: WKWebView
     private let window: NSWindow
     private var timer: Timer?
     var onLogin: (() -> Void)?
     var onClose: (() -> Void)?
 
-    init(site: SiteConfig, tokenStore: KeychainTokenStore) {
+    init(site: SiteConfig, tokenStore: TokenStore) {
         self.site = site
         self.tokenStore = tokenStore
         webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
@@ -306,26 +464,8 @@ private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWin
     }
 
     private func captureToken() {
-        let script = """
-        JSON.stringify({
-          accessToken: localStorage.getItem('auth_token'),
-          refreshToken: localStorage.getItem('refresh_token'),
-          expiresAt: localStorage.getItem('token_expires_at')
-        })
-        """
-        webView.evaluateJavaScript(script) { [weak self] result, _ in
-            guard let self, let json = result as? String,
-                  let data = json.data(using: .utf8),
-                  let values = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let access = values["accessToken"] as? String, !access.isEmpty else { return }
-            let expiresAt: Double?
-            if let value = values["expiresAt"] as? String { expiresAt = Double(value).map { $0 / 1000 } }
-            else { expiresAt = nil }
-            let token = TokenRecord(
-                accessToken: access,
-                refreshToken: values["refreshToken"] as? String,
-                expiresAt: expiresAt
-            )
+        webView.evaluateJavaScript(tokenCaptureScript) { [weak self] result, _ in
+            guard let self, let token = decodedToken(from: result) else { return }
             guard (try? self.tokenStore.save(token, site: self.site.name)) != nil else { return }
             self.timer?.invalidate()
             self.timer = nil
@@ -342,6 +482,59 @@ private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWin
     }
 }
 
+private final class WebSessionRestorer: NSObject, WKNavigationDelegate {
+    private let site: SiteConfig
+    private let tokenStore: TokenStore
+    private let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+    private var timer: Timer?
+    private var attempts = 0
+    private let completion: (Bool) -> Void
+
+    init(site: SiteConfig, tokenStore: TokenStore, completion: @escaping (Bool) -> Void) {
+        self.site = site
+        self.tokenStore = tokenStore
+        self.completion = completion
+        super.init()
+        webView.navigationDelegate = self
+    }
+
+    func start() {
+        guard let url = URL(string: site.base_url + site.login_path) else {
+            finish(false)
+            return
+        }
+        webView.load(URLRequest(url: url))
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.captureToken()
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        captureToken()
+    }
+
+    private func captureToken() {
+        attempts += 1
+        webView.evaluateJavaScript(tokenCaptureScript) { [weak self] result, _ in
+            guard let self else { return }
+            if let token = decodedToken(from: result),
+               (try? self.tokenStore.save(token, site: self.site.name)) != nil {
+                self.finish(true)
+            } else if self.attempts >= 20 {
+                self.finish(false)
+            }
+        }
+    }
+
+    private func finish(_ restored: Bool) {
+        guard timer != nil || attempts == 0 else { return }
+        timer?.invalidate()
+        timer = nil
+        webView.stopLoading()
+        completion(restored)
+    }
+}
+
 private struct UsageSnapshot {
     let accountID: Int
     let account: String
@@ -350,6 +543,22 @@ private struct UsageSnapshot {
     let firstTokenMs: Double
     let durationMs: Double?
     let createdAt: String
+}
+
+private struct CacheRateSnapshot {
+    let requestCount: Int
+    let inputTokens: Double
+    let cacheCreationTokens: Double
+    let cacheReadTokens: Double
+
+    var totalCacheableTokens: Double {
+        inputTokens + cacheCreationTokens + cacheReadTokens
+    }
+
+    var hitRate: Double? {
+        guard totalCacheableTokens > 0 else { return nil }
+        return cacheReadTokens / totalCacheableTokens * 100
+    }
 }
 
 private struct AccountSnapshot {
@@ -393,6 +602,8 @@ private struct AccountListEntry {
     let account: AccountSnapshot
     let isCurrent: Bool
     let monitor: AccountMonitorSnapshot
+    let cacheRate: CacheRateSnapshot?
+    let cacheWindowMinutes: Double
     let isScheduleUpdating: Bool
 }
 
@@ -435,6 +646,32 @@ private func formatCompactTimestamp(_ value: String) -> String {
     return displayFormatter.string(from: date)
 }
 
+private func formatCacheWindow(_ minutes: Double) -> String {
+    if minutes >= 60, (minutes / 60).rounded() == minutes / 60 {
+        return "\(Int(minutes / 60))小时"
+    }
+    return minutes.rounded() == minutes ? "\(Int(minutes))分钟" : String(format: "%.1f分钟", minutes)
+}
+
+private func formatTokenCount(_ value: Double) -> String {
+    let absolute = abs(value)
+    if absolute >= 1_000_000 {
+        return String(format: "%.1fM", value / 1_000_000)
+    }
+    if absolute >= 1_000 {
+        return String(format: "%.1fk", value / 1_000)
+    }
+    return String(format: "%.0f", value)
+}
+
+private func formatCacheRate(_ snapshot: CacheRateSnapshot?, windowMinutes: Double, includeWindowWhenEmpty: Bool) -> String {
+    guard let snapshot else {
+        return includeWindowWhenEmpty ? "缓存 -- · 近\(formatCacheWindow(windowMinutes))无数据" : "缓存 --"
+    }
+    let rate = snapshot.hitRate.map { String(format: "%.1f%%", $0) } ?? "--"
+    return "缓存 \(rate) · \(formatTokenCount(snapshot.cacheReadTokens))/\(formatTokenCount(snapshot.totalCacheableTokens)) · \(snapshot.requestCount)次"
+}
+
 private class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
@@ -443,6 +680,7 @@ private final class AccountRowView: FlippedView {
     private let titleLabel = NSTextField(labelWithString: "")
     private let detailLabel = NSTextField(labelWithString: "")
     private let metricLabel = NSTextField(labelWithString: "")
+    private let cacheLabel = NSTextField(labelWithString: "")
     private let scheduleToggle = NSButton(checkboxWithTitle: "调度", target: nil, action: nil)
     private let monitorButton = NSButton(title: "登录", target: nil, action: nil)
     private let skipButton = NSButton(title: "跳过", target: nil, action: nil)
@@ -461,6 +699,9 @@ private final class AccountRowView: FlippedView {
         metricLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         metricLabel.textColor = .secondaryLabelColor
         metricLabel.lineBreakMode = .byTruncatingTail
+        cacheLabel.font = .systemFont(ofSize: 12)
+        cacheLabel.textColor = .secondaryLabelColor
+        cacheLabel.lineBreakMode = .byTruncatingTail
         scheduleToggle.font = .systemFont(ofSize: 11)
         scheduleToggle.toolTip = "是否参与 Sub2API 调度"
         scheduleToggle.target = self
@@ -474,7 +715,7 @@ private final class AccountRowView: FlippedView {
         skipButton.target = self
         skipButton.action = #selector(skipPressed)
         separator.boxType = .separator
-        [titleLabel, detailLabel, metricLabel, scheduleToggle, monitorButton, skipButton, separator].forEach(addSubview)
+        [titleLabel, detailLabel, metricLabel, cacheLabel, scheduleToggle, monitorButton, skipButton, separator].forEach(addSubview)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -486,6 +727,7 @@ private final class AccountRowView: FlippedView {
         titleLabel.frame = NSRect(x: 8, y: 7, width: textWidth, height: 18)
         detailLabel.frame = NSRect(x: 8, y: 27, width: textWidth, height: 16)
         metricLabel.frame = NSRect(x: 8, y: 47, width: bounds.width - 16, height: 16)
+        cacheLabel.frame = NSRect(x: 8, y: 65, width: bounds.width - 16, height: 16)
         scheduleToggle.frame = NSRect(x: bounds.width - rightWidth, y: 5, width: rightWidth, height: 20)
         monitorButton.frame = NSRect(x: bounds.width - rightWidth, y: 28, width: 55, height: 20)
         skipButton.frame = NSRect(x: bounds.width - 51, y: 28, width: 47, height: 20)
@@ -503,6 +745,7 @@ private final class AccountRowView: FlippedView {
         scheduleToggle.state = account.schedulable ? .on : .off
         scheduleToggle.isEnabled = !entry.isScheduleUpdating
         scheduleToggle.title = entry.isScheduleUpdating ? "更新中" : "调度"
+        cacheLabel.stringValue = formatCacheRate(entry.cacheRate, windowMinutes: entry.cacheWindowMinutes, includeWindowWhenEmpty: true)
 
         if account.isSubscription {
             let quota5h = account.remaining5h.map { String(format: "5h %.0f%%", $0) } ?? "5h --"
@@ -578,6 +821,8 @@ private final class AIDashboardViewController: NSViewController {
     private let channelValue = NSTextField(labelWithString: "等待上游数据")
     private let updateValue = NSTextField(labelWithString: "尚未更新")
     private let recentStack = NSStackView()
+    private let cacheTitle = NSTextField(labelWithString: "缓存命中率")
+    private let cacheValue = NSTextField(labelWithString: "整体 --")
     private let contentScroll = NSScrollView()
     private let contentDocument = FlippedView()
     private let overviewView = NSView()
@@ -594,18 +839,19 @@ private final class AIDashboardViewController: NSViewController {
     var onSkipAccount: ((Int, Bool) -> Void)?
 
     override func loadView() {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 645))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 685))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        contentScroll.frame = NSRect(x: 0, y: 38, width: 360, height: 607)
+        contentScroll.frame = NSRect(x: 0, y: 38, width: 360, height: 647)
+        contentScroll.autoresizingMask = [.width, .height]
         contentScroll.hasVerticalScroller = true
         contentScroll.autohidesScrollers = true
         contentScroll.borderType = .noBorder
         contentScroll.drawsBackground = false
         contentScroll.documentView = contentDocument
-        contentDocument.frame = NSRect(x: 0, y: 0, width: 360, height: 390)
-        overviewView.frame = NSRect(x: 0, y: 0, width: 360, height: 355)
-        accountListView.frame = NSRect(x: 10, y: 355, width: 340, height: 35)
+        contentDocument.frame = NSRect(x: 0, y: 0, width: 360, height: 450)
+        overviewView.frame = NSRect(x: 0, y: 0, width: 360, height: 415)
+        accountListView.frame = NSRect(x: 10, y: 415, width: 340, height: 35)
         contentDocument.addSubview(overviewView)
         contentDocument.addSubview(accountListView)
         container.addSubview(contentScroll)
@@ -654,12 +900,24 @@ private final class AIDashboardViewController: NSViewController {
         recentStack.frame = NSRect(x: 12, y: 6, width: 316, height: 28)
         setRecent([])
 
-        latencyBox.frame = NSRect(x: 10, y: 213, width: 340, height: 129)
-        statusBox.frame = NSRect(x: 10, y: 106, width: 340, height: 97)
-        recentBox.frame = NSRect(x: 10, y: 33, width: 340, height: 63)
+        cacheTitle.font = .systemFont(ofSize: 13, weight: .medium)
+        cacheValue.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        cacheValue.textColor = .secondaryLabelColor
+        cacheValue.maximumNumberOfLines = 2
+        cacheValue.lineBreakMode = .byTruncatingTail
+        let cacheBox = boxView()
+        addViews([cacheTitle, cacheValue], to: cacheBox)
+        cacheTitle.frame = NSRect(x: 14, y: 40, width: 300, height: 20)
+        cacheValue.frame = NSRect(x: 14, y: 6, width: 312, height: 31)
+
+        latencyBox.frame = NSRect(x: 10, y: 286, width: 340, height: 129)
+        statusBox.frame = NSRect(x: 10, y: 179, width: 340, height: 97)
+        recentBox.frame = NSRect(x: 10, y: 106, width: 340, height: 63)
+        cacheBox.frame = NSRect(x: 10, y: 33, width: 340, height: 63)
         overviewView.addSubview(latencyBox)
         overviewView.addSubview(statusBox)
         overviewView.addSubview(recentBox)
+        overviewView.addSubview(cacheBox)
 
         accountCountLabel.frame = NSRect(x: 4, y: 6, width: 332, height: 20)
         accountCountLabel.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -688,7 +946,7 @@ private final class AIDashboardViewController: NSViewController {
         view = container
     }
 
-    func update(usage: UsageSnapshot?, account: AccountSnapshot?, balance: Double?, channel: ChannelSnapshot?, externalKey: ExternalKeySnapshot?, recent: [Double], accounts: [AccountListEntry], updatedAt: Date?, error: String?) {
+    func update(usage: UsageSnapshot?, account: AccountSnapshot?, balance: Double?, channel: ChannelSnapshot?, externalKey: ExternalKeySnapshot?, recent: [Double], cacheRate: CacheRateSnapshot?, cacheWindowMinutes: Double, accounts: [AccountListEntry], updatedAt: Date?, error: String?) {
         if let usage {
             ttftValue.stringValue = formatDuration(usage.firstTokenMs)
             let total = usage.durationMs.map { " · 总 \(formatDuration($0))" } ?? ""
@@ -717,6 +975,13 @@ private final class AIDashboardViewController: NSViewController {
             }
         }
         setRecent(recent)
+        cacheTitle.stringValue = "缓存命中率 · 最近 \(formatCacheWindow(cacheWindowMinutes))"
+        if let cacheRate {
+            let rate = cacheRate.hitRate.map { String(format: "整体 %.1f%%", $0) } ?? "整体 --"
+            cacheValue.stringValue = "\(rate)\n\(formatTokenCount(cacheRate.cacheReadTokens))/\(formatTokenCount(cacheRate.totalCacheableTokens)) tokens · \(cacheRate.requestCount) 次请求"
+        } else {
+            cacheValue.stringValue = "整体 --\n最近 \(formatCacheWindow(cacheWindowMinutes))无数据"
+        }
         updateAccounts(accounts)
         if let error { updateValue.stringValue = error }
         else if let updatedAt {
@@ -776,13 +1041,13 @@ private final class AIDashboardViewController: NSViewController {
 
     private func updateAccounts(_ entries: [AccountListEntry]) {
         accountCountLabel.stringValue = "上游账户 · \(entries.count)"
-        let rowHeight: CGFloat = 68
+        let rowHeight: CGFloat = 86
         let previousOrigin = contentScroll.contentView.bounds.origin
         accountRows.forEach { $0.removeFromSuperview() }
         accountRows.removeAll()
         let listHeight = 32 + CGFloat(entries.count) * rowHeight
-        accountListView.frame = NSRect(x: 10, y: 355, width: 340, height: listHeight)
-        contentDocument.frame = NSRect(x: 0, y: 0, width: 360, height: 355 + listHeight + 10)
+        accountListView.frame = NSRect(x: 10, y: 415, width: 340, height: listHeight)
+        contentDocument.frame = NSRect(x: 0, y: 0, width: 360, height: 415 + listHeight + 10)
         for (index, entry) in entries.enumerated() {
             let row = AccountRowView(frame: NSRect(x: 0, y: 32 + CGFloat(index) * rowHeight, width: 340, height: rowHeight))
             row.autoresizingMask = [.width]
@@ -827,12 +1092,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
     private let dashboard = AIDashboardViewController()
-    private let tokenStore = KeychainTokenStore()
+    private let tokenStore = TokenStore()
     private var config: AIConfig?
     private var subClient: AuthenticatedAPIClient?
+    private var webClients: [String: WebKitAPIClient] = [:]
     private var timers: [Timer] = []
     private var clickMonitor: Any?
     private var loginWindows: [String: LoginWindowController] = [:]
+    private var webSessionRestorers: [String: WebSessionRestorer] = [:]
     private var usage: UsageSnapshot?
     private var account: AccountSnapshot?
     private var channel: ChannelSnapshot?
@@ -846,6 +1113,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitorQueue: [Int] = []
     private var monitorRequestsInFlight: Set<Int> = []
     private var recentTTFT: [Double] = []
+    private var overallCacheRate: CacheRateSnapshot?
+    private var cacheRatesByAccountID: [Int: CacheRateSnapshot] = [:]
     private var updatedAt: Date?
     private var lastError: String?
     private var accountRequestInFlight = false
@@ -859,7 +1128,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.sendAction(on: [.leftMouseDown])
         popover.behavior = .transient
         popover.animates = false
-        popover.contentSize = NSSize(width: 360, height: 645)
+        popover.contentSize = NSSize(width: 360, height: 685)
         popover.contentViewController = dashboard
         _ = dashboard.view
         dashboard.onRefresh = { [weak self] in self?.refreshAll() }
@@ -880,16 +1149,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             let loaded = try loadConfig()
             config = loaded
-            _ = tokenStore.load(site: loaded.sub2api.name)
-            for upstream in loaded.upstreamOverrides {
-                _ = tokenStore.load(site: upstream.site.name)
-            }
             subClient = AuthenticatedAPIClient(site: loaded.sub2api, timeout: loaded.httpTimeout, tokens: tokenStore)
+            for upstream in loaded.upstreamOverrides {
+                let client = WebKitAPIClient(site: upstream.site, timeout: loaded.httpTimeout)
+                webClients[upstream.site.name] = client
+                client.start()
+            }
             scheduleTimers(loaded)
             refreshAll()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                self?.showFirstMissingLogin()
-            }
+            restoreExistingWebSessions(config: loaded)
         } catch {
             showError("配置错误")
             statusItem.button?.toolTip = error.localizedDescription
@@ -923,7 +1191,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let config, let subClient else { return }
         var query = [
             URLQueryItem(name: "page", value: "1"),
-            URLQueryItem(name: "page_size", value: "20"),
+            URLQueryItem(name: "page_size", value: "200"),
             URLQueryItem(name: "sort_by", value: "created_at"),
             URLQueryItem(name: "sort_order", value: "desc"),
         ]
@@ -938,7 +1206,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 switch result {
                 case .success(let object):
-                    guard let item = self.items(from: object).first(where: { self.matchesUsage($0, config: config) }) else {
+                    let matchingItems = self.items(from: object).filter { self.matchesUsage($0, config: config) }
+                    self.updateCacheRates(from: matchingItems, windowMinutes: config.cacheWindowMinutes)
+                    guard let item = matchingItems.first else {
                         self.showError("没有匹配的使用记录")
                         return
                     }
@@ -978,6 +1248,44 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    private func updateCacheRates(from items: [[String: Any]], windowMinutes: Double) {
+        let cutoff = Date().addingTimeInterval(-windowMinutes * 60)
+        var overall = (requestCount: 0, input: 0.0, creation: 0.0, read: 0.0)
+        var byAccount: [Int: (requestCount: Int, input: Double, creation: Double, read: Double)] = [:]
+
+        for item in items {
+            guard let createdAt = string(item, keys: ["created_at", "time"]),
+                  let date = parseTimestamp(createdAt), date >= cutoff else { continue }
+            let input = number(item, keys: ["input_tokens", "prompt_tokens", "uncached_input_tokens"]) ?? 0
+            let creation = number(item, keys: ["cache_creation_tokens", "cache_creation_input_tokens", "cache_write_tokens"]) ?? 0
+            let read = number(item, keys: ["cache_read_tokens", "cache_read_input_tokens", "cached_tokens"]) ?? 0
+            overall.requestCount += 1
+            overall.input += input
+            overall.creation += creation
+            overall.read += read
+            if let accountID = usageAccountID(from: item) {
+                var aggregate = byAccount[accountID] ?? (requestCount: 0, input: 0, creation: 0, read: 0)
+                aggregate.requestCount += 1
+                aggregate.input += input
+                aggregate.creation += creation
+                aggregate.read += read
+                byAccount[accountID] = aggregate
+            }
+        }
+
+        overallCacheRate = overall.requestCount > 0
+            ? CacheRateSnapshot(requestCount: overall.requestCount, inputTokens: overall.input, cacheCreationTokens: overall.creation, cacheReadTokens: overall.read)
+            : nil
+        cacheRatesByAccountID = byAccount.mapValues {
+            CacheRateSnapshot(requestCount: $0.requestCount, inputTokens: $0.input, cacheCreationTokens: $0.creation, cacheReadTokens: $0.read)
+        }
+    }
+
+    private func usageAccountID(from item: [String: Any]) -> Int? {
+        number(item, keys: ["account_id"]).map(Int.init)
+            ?? (item["account"] as? [String: Any]).flatMap { number($0, keys: ["id"]) }.map(Int.init)
     }
 
     private func refreshAccounts() {
@@ -1100,7 +1408,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("缺少中转配置")))
             return
         }
-        let client = AuthenticatedAPIClient(site: upstream.site, timeout: config.httpTimeout, tokens: tokenStore)
+        let client: APIClient = webClients[upstream.site.name]
+            ?? AuthenticatedAPIClient(site: upstream.site, timeout: config.httpTimeout, tokens: tokenStore)
         client.get(path: "/api/v1/auth/me") { [weak self] balanceResult in
             guard let self else { return }
             switch balanceResult {
@@ -1399,8 +1708,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 accountMetric = ""
             }
             let multiplier = externalKey.map { " \(formatRateMultiplier($0.rateMultiplier))" } ?? ""
-            statusItem.button?.title = latency + accountMetric + multiplier
-            statusItem.button?.toolTip = "\(usage.account) · \(usage.model) · 首字延迟 \(Int(usage.firstTokenMs))ms\(accountMetric)\(multiplier)"
+            let cacheMetric = overallCacheRate?.hitRate.map { String(format: " %.1f%%", $0) } ?? " --"
+            statusItem.button?.title = latency + cacheMetric + accountMetric + multiplier
+            let cacheWindow = formatCacheWindow(config?.cacheWindowMinutes ?? 180)
+            statusItem.button?.toolTip = "\(usage.account) · \(usage.model) · 首字延迟 \(Int(usage.firstTokenMs))ms · 最近 \(cacheWindow)缓存命中率 \(overallCacheRate?.hitRate.map { String(format: "%.1f%%", $0) } ?? "--")\(accountMetric)\(multiplier)"
         } else {
             statusItem.button?.title = lastError == nil ? "AI --" : "AI !"
             statusItem.button?.toolTip = lastError ?? "等待 AI 延迟数据"
@@ -1427,10 +1738,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 account: account,
                 isCurrent: usage?.accountID == account.id,
                 monitor: accountMonitors[account.id] ?? AccountMonitorSnapshot(state: .unavailable, balance: nil, key: nil, channel: nil),
+                cacheRate: cacheRatesByAccountID[account.id],
+                cacheWindowMinutes: config?.cacheWindowMinutes ?? 180,
                 isScheduleUpdating: scheduleUpdatesInFlight.contains(account.id)
             )
         }
-        dashboard.update(usage: usage, account: account, balance: balance, channel: channel, externalKey: externalKey, recent: recentTTFT, accounts: entries, updatedAt: updatedAt, error: lastError)
+        dashboard.update(usage: usage, account: account, balance: balance, channel: channel, externalKey: externalKey, recent: recentTTFT, cacheRate: overallCacheRate, cacheWindowMinutes: config?.cacheWindowMinutes ?? 180, accounts: entries, updatedAt: updatedAt, error: lastError)
     }
 
     private func showLogin(for site: SiteConfig?) {
@@ -1457,6 +1770,31 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let config else { return }
         if tokenStore.load(site: config.sub2api.name) == nil {
             showLogin(for: config.sub2api)
+        }
+    }
+
+    private func restoreExistingWebSessions(config: AIConfig) {
+        let sites = [config.sub2api] + config.upstreamOverrides.map(\.site)
+        let missing = sites.filter { tokenStore.load(site: $0.name) == nil }
+        guard !missing.isEmpty else { return }
+        var remaining = missing.count
+        var restoredAny = false
+        for site in missing {
+            let restorer = WebSessionRestorer(site: site, tokenStore: tokenStore) { [weak self] restored in
+                guard let self else { return }
+                self.webSessionRestorers.removeValue(forKey: site.name)
+                restoredAny = restoredAny || restored
+                remaining -= 1
+                if remaining == 0 {
+                    if restoredAny {
+                        self.refreshAll()
+                        self.refreshAccountMonitors()
+                    }
+                    self.showFirstMissingLogin()
+                }
+            }
+            webSessionRestorers[site.name] = restorer
+            restorer.start()
         }
     }
 

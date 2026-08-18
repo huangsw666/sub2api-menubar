@@ -19,17 +19,17 @@ Installation
 Third-party relays are discovered automatically from Sub2API account records.
 The Sub2API account name must match the relay API key name (case-insensitive).
 
-The app is ad-hoc signed but not notarized. It stores login tokens in macOS
-Keychain and keeps credentials out of config.json. After you approve
-install.command, it removes quarantine from only the installed app bundle so
-launchd can start it.
+The app is ad-hoc signed but not notarized. It stores login tokens in a local
+permissions-restricted credentials file and keeps credentials out of
+config.json. After you approve install.command, it removes quarantine from
+only the installed app bundle so launchd can start it.
 
 When upgrading from the original local.ai-latency-monitor prototype, the
-installer migrates its configuration and the app securely imports matching
-Keychain tokens on first use. macOS may request confirmation once.
+installer migrates its configuration and the app restores existing WebKit web
+login sessions on first use.
 
 Uninstallation
 --------------
 
 Open uninstall.command. It removes the LaunchAgent but retains the app,
-configuration, and Keychain tokens.
+configuration, and local credentials.
