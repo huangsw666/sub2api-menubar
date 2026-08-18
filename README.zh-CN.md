@@ -170,6 +170,13 @@ launchctl kickstart -k "gui/$(id -u)/io.github.huangsw666.sub2api-menubar"
 接口响应可以直接是数组，也可以是使用 `items`、`records`、`list` 或
 `monitors` 字段的常见分页对象。
 
+应用也支持 ArithCore 原生接口：当 `credentials.base_url` 为
+`https://api.arithcore.com` 时，会从 `/api/user/self` 读取余额，从
+`/api/token/` 匹配同名密钥，并从 `/api/user/self/groups`（必要时回退到
+`/api/ratio_config` 和 `/api/option/group-ratios`）读取分组倍率。ArithCore 不提供渠道监控数据，
+因此账户行只显示余额和倍率，不显示 PING 或可用性。ArithCore 登录使用站点
+WebKit 会话中的 `uid` 和 `New-Api-User` 请求头，不会误用 Sub2API 的 Bearer 密钥。
+
 ### 账户调度
 
 概览中的上游区域会列出 `GET /api/v1/admin/accounts` 返回的全部账户。参与调度的账户

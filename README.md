@@ -181,6 +181,15 @@ The relay is expected to expose:
 Responses may be arrays or common paginated objects using `items`, `records`,
 `list`, or `monitors`.
 
+ArithCore is supported through its native API when `credentials.base_url` is
+`https://api.arithcore.com`: the app reads balance from `/api/user/self`,
+matches the key from `/api/token/`, and resolves the group multiplier from
+`/api/user/self/groups` (falling back to `/api/ratio_config` and
+`/api/option/group-ratios`). ArithCore
+does not expose channel-monitor data, so its row shows only balance and
+multiplier. Its WebKit session uses the site's `uid` local-storage value and
+`New-Api-User` header rather than a Sub2API Bearer token.
+
 ### Account scheduling
 
 The upstream section lists every account returned by `GET /api/v1/admin/accounts`.

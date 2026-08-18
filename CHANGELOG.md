@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-08-18
+
+### Fixed
+
+- Read ArithCore group multipliers from `/api/user/self/groups` before falling back to legacy ratio endpoints
+- Send ArithCore's `New-Api-User` header only to ArithCore upstreams
+- Avoid displaying unavailable channel metrics for upstreams without channel-monitor support
+
 ## [0.2.0] - 2026-08-17
 
 ### Added

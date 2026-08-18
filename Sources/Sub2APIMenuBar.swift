@@ -6,6 +6,7 @@ private struct SiteConfig {
     let name: String
     let base_url: String
     let login_path: String
+    let adapter: String?
 }
 
 private struct UpstreamConfig: Decodable {
@@ -15,9 +16,15 @@ private struct UpstreamConfig: Decodable {
     let login_path: String?
     let key_name: String?
     let channel_group: String?
+    let adapter: String?
+
+    var effectiveAdapter: String? {
+        if let adapter, !adapter.isEmpty { return adapter.lowercased() }
+        return URL(string: base_url)?.host?.lowercased() == "api.arithcore.com" ? "arithcore" : nil
+    }
 
     var site: SiteConfig {
-        SiteConfig(name: name, base_url: base_url, login_path: login_path ?? "/login")
+        SiteConfig(name: name, base_url: base_url, login_path: login_path ?? "/login", adapter: effectiveAdapter)
     }
 
     func matches(accountName: String) -> Bool {
@@ -39,7 +46,7 @@ private struct AIConfig: Decodable {
     let http_timeout_seconds: Double?
 
     var sub2api: SiteConfig {
-        SiteConfig(name: "Sub2API", base_url: sub2api_base_url, login_path: sub2api_login_path ?? "/login")
+        SiteConfig(name: "Sub2API", base_url: sub2api_base_url, login_path: sub2api_login_path ?? "/login", adapter: nil)
     }
 
     var usageInterval: Double { max(3, usage_interval_seconds ?? 10) }
@@ -358,15 +365,21 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
             return
         }
         let script = """
+        const isArithCore = \((site.adapter == "arithcore") ? "true" : "false");
+        const authToken = String(localStorage.getItem('auth_token') || '').replace(/^Bearer\\s+/i, '');
+        const userID = String(localStorage.getItem('uid') || '');
+        const headers = {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'X-User-UI-Request': '1',
+          'Accept-Language': 'zh-CN'
+        };
+        if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+        if (isArithCore && userID) headers['New-Api-User'] = userID;
         const response = await fetch(url, {
           method: 'GET',
           credentials: 'include',
-          headers: {
-            'Authorization': 'Bearer ' + String(localStorage.getItem('auth_token') || '').replace(/^Bearer\\s+/i, ''),
-            'Accept': 'application/json',
-            'X-User-UI-Request': '1',
-            'Accept-Language': 'zh-CN'
-          }
+          headers
         });
         return { status: response.status, body: await response.text() };
         """
@@ -452,16 +465,24 @@ function readStorage(keys) {
 }
 JSON.stringify({
   accessToken: normalizeToken(readStorage(['auth_token', 'access_token', 'accessToken', 'token'])),
+  userID: readStorage(['uid']),
   refreshToken: normalizeToken(readStorage(['refresh_token', 'refreshToken'])),
   expiresAt: readStorage(['token_expires_at', 'expires_at', 'expiresAt'])
 })
 """
 
-private func decodedToken(from result: Any?) -> TokenRecord? {
+private func decodedToken(from result: Any?, allowUserID: Bool = false) -> TokenRecord? {
     guard let json = result as? String,
           let data = json.data(using: .utf8),
-          let values = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let access = values["accessToken"] as? String, !access.isEmpty else { return nil }
+          let values = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+    let access: String
+    if let token = values["accessToken"] as? String, !token.isEmpty {
+        access = token
+    } else if allowUserID, let userID = values["userID"] as? String, !userID.isEmpty {
+        access = "__web_session__:\(userID)"
+    } else {
+        return nil
+    }
     let expiresAt: Double?
     if let value = values["expiresAt"] as? String,
        let timestamp = Double(value) {
@@ -517,7 +538,8 @@ private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWin
 
     private func captureToken() {
         webView.evaluateJavaScript(tokenCaptureScript) { [weak self] result, _ in
-            guard let self, let token = decodedToken(from: result) else { return }
+            guard let self,
+                  let token = decodedToken(from: result, allowUserID: self.site.adapter == "arithcore") else { return }
             guard (try? self.tokenStore.save(token, site: self.site.name)) != nil else { return }
             self.timer?.invalidate()
             self.timer = nil
@@ -569,7 +591,7 @@ private final class WebSessionRestorer: NSObject, WKNavigationDelegate {
         attempts += 1
         webView.evaluateJavaScript(tokenCaptureScript) { [weak self] result, _ in
             guard let self else { return }
-            if let token = decodedToken(from: result),
+            if let token = decodedToken(from: result, allowUserID: self.site.adapter == "arithcore"),
                (try? self.tokenStore.save(token, site: self.site.name)) != nil {
                 self.finish(true)
             } else if self.attempts >= 20 {
@@ -831,9 +853,13 @@ private final class AccountRowView: FlippedView {
         case .active:
             let balance = entry.monitor.balance.map { String(format: "$%.2f", $0) } ?? "$--"
             let multiplier = entry.monitor.key.map { formatRateMultiplier($0.rateMultiplier) } ?? "--x"
-            let ping = entry.monitor.channel?.pingMs.map { "PING \(Int($0))ms" } ?? "PING --"
-            let availability = entry.monitor.channel?.availability.map { String(format: "可用 %.1f%%", $0) } ?? "可用 --"
-            metricLabel.stringValue = "\(balance) · \(multiplier) · \(ping) · \(availability)"
+            var metrics = [balance, multiplier]
+            if let channel = entry.monitor.channel {
+                let ping = channel.pingMs.map { "PING \(Int($0))ms" } ?? "PING --"
+                let availability = channel.availability.map { String(format: "可用 %.1f%%", $0) } ?? "可用 --"
+                metrics += [ping, availability]
+            }
+            metricLabel.stringValue = metrics.joined(separator: " · ")
             monitorButton.title = "重登"
             monitorButton.isEnabled = true
             skipButton.title = "跳过"
@@ -1052,7 +1078,7 @@ private final class AIDashboardViewController: NSViewController {
             let availability = channel.availability.map { String(format: "7天可用性 %.2f%%", $0) } ?? "7天可用性 --"
             channelValue.stringValue = "\(status)\(concurrency)\n\(latency) · \(ping)\n\(availability)"
         } else {
-            channelValue.stringValue = "等待渠道数据"
+            channelValue.stringValue = externalKey == nil ? "等待渠道数据" : "该上游不提供渠道状态"
         }
     }
 
@@ -1370,6 +1396,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.accounts = snapshots
                     self.accountItems = rawItems
                     self.upstreamsByAccountID = discoveredUpstreams
+                    for upstream in discoveredUpstreams.values {
+                        self.prepareWebClient(for: upstream)
+                    }
                     self.reconcileAccountMonitorStates()
                     self.syncCurrentAccountDetails()
                     self.markUpdated()
@@ -1456,12 +1485,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshMonitor(accountID: Int) {
         guard let upstream = upstreamsByAccountID[accountID],
               let account = accounts.first(where: { $0.id == accountID }),
-              let config else {
+              config != nil else {
             finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("缺少中转配置")))
             return
         }
-        let client: APIClient = webClients[upstream.site.name]
-            ?? AuthenticatedAPIClient(site: upstream.site, timeout: config.httpTimeout, tokens: tokenStore)
+        let client: APIClient = prepareWebClient(for: upstream)
+        if upstream.effectiveAdapter == "arithcore" {
+            refreshArithCoreMonitor(accountID: accountID, account: account, upstream: upstream, client: client)
+            return
+        }
         client.get(path: "/api/v1/auth/me") { [weak self] balanceResult in
             guard let self else { return }
             switch balanceResult {
@@ -1518,6 +1550,104 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                                     result: .success(AccountMonitorSnapshot(state: .active, balance: balance, key: key, channel: channel))
                                 )
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    private func prepareWebClient(for upstream: UpstreamConfig) -> WebKitAPIClient {
+        if let existing = webClients[upstream.site.name] { return existing }
+        let timeout = config?.httpTimeout ?? 8
+        let client = WebKitAPIClient(site: upstream.site, timeout: timeout)
+        webClients[upstream.site.name] = client
+        client.start()
+        return client
+    }
+
+    private func refreshArithCoreMonitor(
+        accountID: Int,
+        account: AccountSnapshot,
+        upstream: UpstreamConfig,
+        client: APIClient
+    ) {
+        client.get(path: "/api/user/self") { [weak self] balanceResult in
+            guard let self else { return }
+            switch balanceResult {
+            case .failure(let error):
+                self.finishMonitorRefresh(accountID: accountID, result: .failure(error))
+            case .success(let object):
+                guard let user = self.arithDictionary(from: object),
+                      let balance = self.arithBalance(from: user) else {
+                    self.finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("ArithCore 余额响应无法解析")))
+                    return
+                }
+                let query = [URLQueryItem(name: "p", value: "1"), URLQueryItem(name: "size", value: "100")]
+                client.get(path: "/api/token/", query: query) { [weak self] keyResult in
+                    guard let self else { return }
+                    switch keyResult {
+                    case .failure(let error):
+                        self.finishMonitorRefresh(accountID: accountID, result: .failure(error))
+                    case .success(let keyObject):
+                        let keyName = upstream.key_name ?? account.name
+                        guard let item = self.arithItems(from: keyObject).first(where: {
+                            self.string($0, keys: ["name"])?.caseInsensitiveCompare(keyName) == .orderedSame
+                        }), let group = self.nestedString(item, paths: [["group", "name"], ["group_name"], ["group"]]) else {
+                            self.finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("ArithCore 找不到同名密钥或分组")))
+                            return
+                        }
+                        self.refreshArithCoreRatio(client: client, group: group, keyItem: item) { ratioResult in
+                            switch ratioResult {
+                            case .failure(let error):
+                                self.finishMonitorRefresh(accountID: accountID, result: .failure(error))
+                            case .success(let ratio):
+                                let key = ExternalKeySnapshot(
+                                    name: self.string(item, keys: ["name"]) ?? keyName,
+                                    group: group,
+                                    rateMultiplier: ratio,
+                                    currentConcurrency: nil
+                                )
+                                self.finishMonitorRefresh(
+                                    accountID: accountID,
+                                    result: .success(AccountMonitorSnapshot(state: .active, balance: balance, key: key, channel: nil))
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func refreshArithCoreRatio(
+        client: APIClient,
+        group: String,
+        keyItem: [String: Any],
+        completion: @escaping (Result<Double, Error>) -> Void
+    ) {
+        if let ratio = arithRatio(in: keyItem, group: group) {
+            completion(.success(ratio))
+            return
+        }
+        client.get(path: "/api/user/self/groups") { [weak self] groupsResult in
+            guard let self else { return }
+            if case .success(let object) = groupsResult, let ratio = self.arithRatio(in: object, group: group) {
+                completion(.success(ratio))
+                return
+            }
+            client.get(path: "/api/ratio_config") { [weak self] firstFallbackResult in
+                guard let self else { return }
+                if case .success(let object) = firstFallbackResult, let ratio = self.arithRatio(in: object, group: group) {
+                    completion(.success(ratio))
+                } else {
+                    client.get(path: "/api/option/group-ratios") { [weak self] secondFallbackResult in
+                        guard let self else { return }
+                        if case .success(let object) = secondFallbackResult, let ratio = self.arithRatio(in: object, group: group) {
+                            completion(.success(ratio))
+                        } else {
+                            completion(.failure(MonitorError.invalidResponse("ArithCore 无法解析分组倍率")))
                         }
                     }
                 }
@@ -1666,7 +1796,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             base_url: monitorBaseURL,
             login_path: "/login",
             key_name: accountName,
-            channel_group: nil
+            channel_group: nil,
+            adapter: URL(string: monitorBaseURL)?.host?.lowercased() == "api.arithcore.com" ? "arithcore" : nil
         )
     }
 
@@ -1696,6 +1827,68 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             if let array = dictionary[key] as? [[String: Any]] { return array }
         }
         return []
+    }
+
+    private func arithDictionary(from object: Any) -> [String: Any]? {
+        guard let dictionary = object as? [String: Any] else { return nil }
+        if let data = dictionary["data"] as? [String: Any] { return data }
+        return dictionary
+    }
+
+    private func arithItems(from object: Any) -> [[String: Any]] {
+        if let array = object as? [[String: Any]] { return array }
+        guard let dictionary = object as? [String: Any] else { return [] }
+        for key in ["items", "records", "list", "data"] {
+            if let value = dictionary[key] as? [[String: Any]] { return value }
+            if let nested = dictionary[key] as? [String: Any] {
+                let items = arithItems(from: nested)
+                if !items.isEmpty { return items }
+            }
+        }
+        return []
+    }
+
+    private func arithBalance(from user: [String: Any]) -> Double? {
+        if let direct = number(user, keys: ["balance", "balance_usd", "quota_dollars", "remaining_balance"]) {
+            return direct
+        }
+        guard let quota = number(user, keys: ["quota", "remain_quota"]) else { return nil }
+        return quota >= 1_000 ? quota / 500_000 : quota
+    }
+
+    private func arithRatio(in object: Any, group: String) -> Double? {
+        if let dictionary = object as? [String: Any] {
+            for key in ["group_ratio", "group_ratios", "ratios"] {
+                if let values = dictionary[key] as? [String: Any],
+                   let value = values.first(where: { $0.key.caseInsensitiveCompare(group) == .orderedSame })?.value,
+                   let ratio = arithRatioValue(value) {
+                    return ratio
+                }
+            }
+            if let named = dictionary.first(where: { $0.key.caseInsensitiveCompare(group) == .orderedSame }),
+               let ratio = arithRatioValue(named.value) {
+                return ratio
+            }
+            if let name = string(dictionary, keys: ["group", "group_name", "name"]),
+               name.caseInsensitiveCompare(group) == .orderedSame,
+               let ratio = number(dictionary, keys: ["display_ratio", "rate_multiplier", "ratio", "multiplier"]) {
+                return ratio
+            }
+            for value in dictionary.values {
+                if let ratio = arithRatio(in: value, group: group) { return ratio }
+            }
+        } else if let array = object as? [Any] {
+            for value in array {
+                if let ratio = arithRatio(in: value, group: group) { return ratio }
+            }
+        }
+        return nil
+    }
+
+    private func arithRatioValue(_ value: Any) -> Double? {
+        if let ratio = AuthenticatedAPIClient.double(value) { return ratio }
+        guard let dictionary = value as? [String: Any] else { return nil }
+        return number(dictionary, keys: ["display_ratio", "rate_multiplier", "ratio", "multiplier"])
     }
 
     private func string(_ dictionary: [String: Any], keys: [String]) -> String? {
