@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3] - 2026-08-24
+
+### Added
+
+- GitHub Actions CI for compiling and verifying universal macOS packages
+- Automatic GitHub Release publishing for version tags
+
 ## [0.2.2] - 2026-08-24
 
 ### Fixed
