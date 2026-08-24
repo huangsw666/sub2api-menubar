@@ -17,3 +17,18 @@ For code changes:
 
 By contributing, you agree that your contribution is licensed under the MIT
 License.
+
+## Releases
+
+Update `VERSION` and `CFBundleVersion` in `scripts/installer.py`, add the
+release notes to `CHANGELOG.md`, and push those changes to `main`. Publishing
+a matching version tag triggers the release workflow automatically:
+
+```bash
+git tag v0.2.3
+git push origin v0.2.3
+```
+
+The workflow verifies that the tag matches `VERSION`, builds the universal
+macOS package, checks its SHA-256 digest, and creates the GitHub Release with
+both files attached.

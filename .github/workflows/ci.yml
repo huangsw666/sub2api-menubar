@@ -1,0 +1,48 @@
+name: macOS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Compile application
+        run: |
+          xcrun --sdk macosx swiftc \
+            -swift-version 5 \
+            -O \
+            Sources/Sub2APIMenuBar.swift \
+            -framework AppKit \
+            -framework WebKit \
+            -framework Security \
+            -o "$RUNNER_TEMP/Sub2APIMenuBar"
+
+      - name: Build universal package
+        run: ./scripts/build-release.sh
+
+      - name: Verify package checksum
+        working-directory: dist
+        run: shasum -a 256 -c *.sha256
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sub2api-menubar-macos
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
