@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Compile application
         run: |
@@ -38,11 +38,10 @@ jobs:
         run: shasum -a 256 -c *.sha256
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sub2api-menubar-macos
           path: |
             dist/*.zip
             dist/*.sha256
           if-no-files-found: error
-

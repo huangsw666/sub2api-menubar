@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Validate tag and package version
         run: |
@@ -46,4 +46,3 @@ jobs:
               --title "Sub2API Menu Bar $GITHUB_REF_NAME" \
               --generate-notes
           fi
-
