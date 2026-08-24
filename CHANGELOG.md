@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2] - 2026-08-24
+
+### Fixed
+
+- Refresh expired relay sessions before retrying authenticated requests
+- Keep relay balance and multiplier available when channel-monitor data is missing
+- Clear stale relay metrics when authentication has expired
+- Reuse account rows and recent-latency labels to prevent AppKit objects from accumulating during periodic refreshes
+- Release temporary login and session-restoration WebViews after they finish
+
 ## [0.2.1] - 2026-08-18
 
 ### Fixed

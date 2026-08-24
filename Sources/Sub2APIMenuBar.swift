@@ -93,6 +93,11 @@ private final class TokenStore {
         return loadAll()[site]
     }
 
+    func isExpired(site: String, gracePeriod: Double = 30) -> Bool {
+        guard let expiresAt = load(site: site)?.expiresAt else { return false }
+        return expiresAt <= Date().timeIntervalSince1970 + gracePeriod
+    }
+
     func save(_ token: TokenRecord, site: String) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -366,21 +371,67 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
         }
         let script = """
         const isArithCore = \((site.adapter == "arithcore") ? "true" : "false");
-        const authToken = String(localStorage.getItem('auth_token') || '').replace(/^Bearer\\s+/i, '');
-        const userID = String(localStorage.getItem('uid') || '');
-        const headers = {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-          'X-User-UI-Request': '1',
-          'Accept-Language': 'zh-CN'
-        };
-        if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
-        if (isArithCore && userID) headers['New-Api-User'] = userID;
-        const response = await fetch(url, {
-          method: 'GET',
-          credentials: 'include',
-          headers
-        });
+        function requestHeaders() {
+          const authToken = String(localStorage.getItem('auth_token') || '').replace(/^Bearer\\s+/i, '');
+          const userID = String(localStorage.getItem('uid') || '');
+          const headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+            'X-User-UI-Request': '1',
+            'Accept-Language': 'zh-CN'
+          };
+          if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+          if (isArithCore && userID) headers['New-Api-User'] = userID;
+          return headers;
+        }
+        async function refreshSession() {
+          if (isArithCore) return false;
+          const refreshToken = localStorage.getItem('refresh_token');
+          if (!refreshToken) return false;
+          try {
+            const refreshURL = new URL('/api/v1/auth/refresh', url).toString();
+            const refreshResponse = await fetch(refreshURL, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+              body: JSON.stringify({ refresh_token: refreshToken })
+            });
+            if (!refreshResponse.ok) return false;
+            const refreshBody = JSON.parse(await refreshResponse.text());
+            const data = refreshBody && refreshBody.data ? refreshBody.data : refreshBody;
+            if (!data || !data.access_token) return false;
+            localStorage.setItem('auth_token', String(data.access_token));
+            if (data.refresh_token) localStorage.setItem('refresh_token', String(data.refresh_token));
+            if (data.expires_in) localStorage.setItem('token_expires_at', String(Date.now() + Number(data.expires_in) * 1000));
+            return true;
+          } catch (_) {
+            return false;
+          }
+        }
+        async function sendRequest() {
+          const expiresAt = Number(localStorage.getItem('token_expires_at') || 0);
+          if (!isArithCore && expiresAt > 0 && expiresAt <= Date.now() + 5000) {
+            if (!await refreshSession()) localStorage.removeItem('auth_token');
+          }
+          let response = await fetch(url, {
+            method: 'GET',
+            credentials: 'include',
+            headers: requestHeaders()
+          });
+          if (response.status === 401 && !isArithCore) {
+            if (await refreshSession()) {
+              response = await fetch(url, {
+                method: 'GET',
+                credentials: 'include',
+                headers: requestHeaders()
+              });
+            } else {
+              localStorage.removeItem('auth_token');
+            }
+          }
+          return response;
+        }
+        const response = await sendRequest();
         return { status: response.status, body: await response.text() };
         """
         var completed = false
@@ -503,6 +554,7 @@ private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWin
     private let webView: WKWebView
     private let window: NSWindow
     private var timer: Timer?
+    private var finished = false
     var onLogin: (() -> Void)?
     var onClose: (() -> Void)?
 
@@ -525,6 +577,7 @@ private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWin
     }
 
     func show() {
+        finished = false
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         if let url = URL(string: site.base_url + site.login_path) {
@@ -541,18 +594,26 @@ private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWin
             guard let self,
                   let token = decodedToken(from: result, allowUserID: self.site.adapter == "arithcore") else { return }
             guard (try? self.tokenStore.save(token, site: self.site.name)) != nil else { return }
-            self.timer?.invalidate()
-            self.timer = nil
             self.window.orderOut(nil)
+            self.finish()
             self.onLogin?()
             self.onClose?()
         }
     }
 
     func windowWillClose(_ notification: Notification) {
+        finish()
+        onClose?()
+    }
+
+    private func finish() {
+        guard !finished else { return }
+        finished = true
         timer?.invalidate()
         timer = nil
-        onClose?()
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        window.contentView = nil
     }
 }
 
@@ -562,6 +623,7 @@ private final class WebSessionRestorer: NSObject, WKNavigationDelegate {
     private let webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
     private var timer: Timer?
     private var attempts = 0
+    private var finished = false
     private let completion: (Bool) -> Void
 
     init(site: SiteConfig, tokenStore: TokenStore, completion: @escaping (Bool) -> Void) {
@@ -588,6 +650,7 @@ private final class WebSessionRestorer: NSObject, WKNavigationDelegate {
     }
 
     private func captureToken() {
+        guard !finished else { return }
         attempts += 1
         webView.evaluateJavaScript(tokenCaptureScript) { [weak self] result, _ in
             guard let self else { return }
@@ -601,10 +664,12 @@ private final class WebSessionRestorer: NSObject, WKNavigationDelegate {
     }
 
     private func finish(_ restored: Bool) {
-        guard timer != nil || attempts == 0 else { return }
+        guard !finished else { return }
+        finished = true
         timer?.invalidate()
         timer = nil
         webView.stopLoading()
+        webView.navigationDelegate = nil
         completion(restored)
     }
 }
@@ -820,6 +885,10 @@ private final class AccountRowView: FlippedView {
         scheduleToggle.isEnabled = !entry.isScheduleUpdating
         scheduleToggle.title = entry.isScheduleUpdating ? "更新中" : "调度"
         cacheLabel.stringValue = formatCacheRate(entry.cacheRate, windowMinutes: entry.cacheWindowMinutes, includeWindowWhenEmpty: true)
+        monitorButton.isHidden = false
+        monitorButton.isEnabled = true
+        skipButton.isHidden = false
+        skipButton.isEnabled = true
 
         if account.isSubscription {
             let quota5h = account.remaining5h.map { String(format: "5h %.0f%%", $0) } ?? "5h --"
@@ -830,7 +899,6 @@ private final class AccountRowView: FlippedView {
             return
         }
 
-        monitorButton.isHidden = false
         switch entry.monitor.state {
         case .notApplicable, .unavailable:
             metricLabel.stringValue = "未发现第三方监控地址\(lastUsedText(account.lastUsedAt))"
@@ -906,7 +974,8 @@ private final class AIDashboardViewController: NSViewController {
     private let overviewView = NSView()
     private let accountListView = FlippedView()
     private let accountCountLabel = NSTextField(labelWithString: "上游账户")
-    private var accountRows: [AccountRowView] = []
+    private var recentFields: [NSTextField] = []
+    private var accountRows: [Int: AccountRowView] = [:]
     var onRefresh: (() -> Void)?
     var onLoginSub2API: (() -> Void)?
     var onLoginUpstream: (() -> Void)?
@@ -1078,7 +1147,7 @@ private final class AIDashboardViewController: NSViewController {
             let availability = channel.availability.map { String(format: "7天可用性 %.2f%%", $0) } ?? "7天可用性 --"
             channelValue.stringValue = "\(status)\(concurrency)\n\(latency) · \(ping)\n\(availability)"
         } else {
-            channelValue.stringValue = externalKey == nil ? "等待渠道数据" : "该上游不提供渠道状态"
+            channelValue.stringValue = externalKey == nil ? "等待渠道数据" : "渠道状态暂不可用"
         }
     }
 
@@ -1095,17 +1164,21 @@ private final class AIDashboardViewController: NSViewController {
     }
 
     private func setRecent(_ values: [Double]) {
-        recentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        if recentFields.isEmpty {
+            for _ in 0..<5 {
+                let field = NSTextField(labelWithString: "--")
+                field.alignment = .center
+                field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+                field.wantsLayer = true
+                field.layer?.cornerRadius = 4
+                field.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+                recentStack.addArrangedSubview(field)
+                recentFields.append(field)
+            }
+        }
         let shown = Array(values.suffix(5))
-        for index in 0..<5 {
-            let text = index < shown.count ? formatRecentDuration(shown[index]) : "--"
-            let field = NSTextField(labelWithString: text)
-            field.alignment = .center
-            field.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-            field.wantsLayer = true
-            field.layer?.cornerRadius = 4
-            field.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            recentStack.addArrangedSubview(field)
+        for (index, field) in recentFields.enumerated() {
+            field.stringValue = index < shown.count ? formatRecentDuration(shown[index]) : "--"
         }
     }
 
@@ -1121,20 +1194,30 @@ private final class AIDashboardViewController: NSViewController {
         accountCountLabel.stringValue = "上游账户 · \(entries.count)"
         let rowHeight: CGFloat = 86
         let previousOrigin = contentScroll.contentView.bounds.origin
-        accountRows.forEach { $0.removeFromSuperview() }
-        accountRows.removeAll()
+        let validAccountIDs = Set(entries.map { $0.account.id })
+        let removedAccountIDs = accountRows.keys.filter { !validAccountIDs.contains($0) }
+        for accountID in removedAccountIDs {
+            accountRows.removeValue(forKey: accountID)?.removeFromSuperview()
+        }
         let listHeight = 32 + CGFloat(entries.count) * rowHeight
         accountListView.frame = NSRect(x: 10, y: 415, width: 340, height: listHeight)
         contentDocument.frame = NSRect(x: 0, y: 0, width: 360, height: 415 + listHeight + 10)
         for (index, entry) in entries.enumerated() {
-            let row = AccountRowView(frame: NSRect(x: 0, y: 32 + CGFloat(index) * rowHeight, width: 340, height: rowHeight))
-            row.autoresizingMask = [.width]
-            row.onSetSchedulable = { [weak self] id, enabled in self?.onSetSchedulable?(id, enabled) }
-            row.onLogin = { [weak self] id in self?.onLoginAccount?(id) }
-            row.onSkip = { [weak self] id, skipped in self?.onSkipAccount?(id, skipped) }
+            let accountID = entry.account.id
+            let row: AccountRowView
+            if let existing = accountRows[accountID] {
+                row = existing
+            } else {
+                row = AccountRowView(frame: .zero)
+                row.autoresizingMask = [.width]
+                row.onSetSchedulable = { [weak self] id, enabled in self?.onSetSchedulable?(id, enabled) }
+                row.onLogin = { [weak self] id in self?.onLoginAccount?(id) }
+                row.onSkip = { [weak self] id, skipped in self?.onSkipAccount?(id, skipped) }
+                accountListView.addSubview(row)
+                accountRows[accountID] = row
+            }
+            row.frame = NSRect(x: 0, y: 32 + CGFloat(index) * rowHeight, width: 340, height: rowHeight)
             row.configure(with: entry)
-            accountListView.addSubview(row)
-            accountRows.append(row)
         }
         contentDocument.layoutSubtreeIfNeeded()
         let maxY = max(0, contentDocument.bounds.height - contentScroll.contentView.bounds.height)
@@ -1515,9 +1598,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                         let keyName = upstream.key_name ?? account.name
                         guard let item = self.items(from: keyObject).first(where: {
                             self.string($0, keys: ["name"])?.caseInsensitiveCompare(keyName) == .orderedSame
-                        }), let group = item["group"] as? [String: Any],
-                           let multiplier = self.number(group, keys: ["rate_multiplier"]) else {
-                            self.finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("找不到同名密钥或分组")))
+                        }) else {
+                            self.finishMonitorWithoutChannel(accountID: accountID, balance: balance, key: nil)
+                            return
+                        }
+                        guard let group = item["group"] as? [String: Any],
+                              let multiplier = self.number(group, keys: ["rate_multiplier"]) else {
+                            self.finishMonitorWithoutChannel(accountID: accountID, balance: balance, key: nil)
                             return
                         }
                         let key = ExternalKeySnapshot(
@@ -1529,13 +1616,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                         client.get(path: "/api/v1/channel-monitors") { [weak self] channelResult in
                             guard let self else { return }
                             switch channelResult {
-                            case .failure(let error):
-                                self.finishMonitorRefresh(accountID: accountID, result: .failure(error))
+                            case .failure:
+                                self.finishMonitorWithoutChannel(accountID: accountID, balance: balance, key: key)
                             case .success(let channelObject):
                                 guard let channelItem = self.items(from: channelObject).first(where: {
                                     self.string($0, keys: ["name", "group_name", "group"])?.caseInsensitiveCompare(key.group) == .orderedSame
                                 }) else {
-                                    self.finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("找不到渠道 \(key.group)")))
+                                    self.finishMonitorWithoutChannel(accountID: accountID, balance: balance, key: key)
                                     return
                                 }
                                 let channel = ChannelSnapshot(
@@ -1555,6 +1642,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    private func finishMonitorWithoutChannel(accountID: Int, balance: Double, key: ExternalKeySnapshot?) {
+        finishMonitorRefresh(
+            accountID: accountID,
+            result: .success(AccountMonitorSnapshot(state: .active, balance: balance, key: key, channel: nil))
+        )
     }
 
     @discardableResult
@@ -1666,17 +1760,30 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.accountMonitors[accountID] = snapshot
                 case .failure(let error):
                     let previous = self.accountMonitors[accountID]
+                    let clearPreviousData = self.shouldClearMonitorData(for: error)
                     self.accountMonitors[accountID] = AccountMonitorSnapshot(
                         state: error is MonitorError ? .failed(error.localizedDescription) : .failed("监控失败：\(error.localizedDescription)"),
-                        balance: previous?.balance,
-                        key: previous?.key,
-                        channel: previous?.channel
+                        balance: clearPreviousData ? nil : previous?.balance,
+                        key: clearPreviousData ? nil : previous?.key,
+                        channel: clearPreviousData ? nil : previous?.channel
                     )
                 }
             }
             self.syncCurrentAccountDetails()
             self.updateUI()
             self.pumpMonitorQueue()
+        }
+    }
+
+    private func shouldClearMonitorData(for error: Error) -> Bool {
+        guard let monitorError = error as? MonitorError else { return false }
+        switch monitorError {
+        case .loginRequired:
+            return true
+        case .http(let status):
+            return status == 401 || status == 403
+        case .invalidResponse:
+            return false
         }
     }
 
@@ -2013,14 +2120,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showFirstMissingLogin() {
         guard let config else { return }
-        if tokenStore.load(site: config.sub2api.name) == nil {
+        if tokenStore.load(site: config.sub2api.name) == nil || tokenStore.isExpired(site: config.sub2api.name) {
             showLogin(for: config.sub2api)
         }
     }
 
     private func restoreExistingWebSessions(config: AIConfig) {
         let sites = [config.sub2api] + config.upstreamOverrides.map(\.site)
-        let missing = sites.filter { tokenStore.load(site: $0.name) == nil }
+        let missing = sites.filter {
+            tokenStore.load(site: $0.name) == nil || tokenStore.isExpired(site: $0.name)
+        }
         guard !missing.isEmpty else { return }
         var remaining = missing.count
         var restoredAny = false
