@@ -283,6 +283,7 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
     private var ready = false
     private var loading = false
     private var pending: [(String, [URLQueryItem], (Result<Any, Error>) -> Void)] = []
+    private var expectedHost: String?
 
     init(site: SiteConfig, timeout: Double) {
         self.site = site
@@ -310,15 +311,12 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
             failPending(MonitorError.invalidResponse("无效接口地址"))
             return
         }
+        expectedHost = url.host?.lowercased()
         webView.load(URLRequest(url: url))
-        DispatchQueue.main.asyncAfter(deadline: .now() + min(3, timeout)) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
             guard let self, !self.ready else { return }
-            if self.webView.url?.host?.caseInsensitiveCompare(url.host ?? "") == .orderedSame {
-                self.markReady()
-            } else {
-                self.loading = false
-                self.failPending(MonitorError.invalidResponse("\(self.site.name) 页面加载超时"))
-            }
+            self.loading = false
+            self.failPending(MonitorError.invalidResponse("\(self.site.name) 页面加载超时"))
         }
     }
 
@@ -331,11 +329,13 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
         request(path: path, query: query, completion: completion)
     }
 
-    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        markReady()
-    }
-
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard let expectedHost,
+              webView.url?.host?.lowercased() == expectedHost else {
+            loading = false
+            failPending(MonitorError.invalidResponse("\(site.name) 页面跳转到了非登录站点"))
+            return
+        }
         markReady()
     }
 
@@ -371,68 +371,78 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
         }
         let script = """
         const isArithCore = \((site.adapter == "arithcore") ? "true" : "false");
-        function requestHeaders() {
-          const authToken = String(localStorage.getItem('auth_token') || '').replace(/^Bearer\\s+/i, '');
-          const userID = String(localStorage.getItem('uid') || '');
-          const headers = {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-            'X-User-UI-Request': '1',
-            'Accept-Language': 'zh-CN'
-          };
-          if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
-          if (isArithCore && userID) headers['New-Api-User'] = userID;
-          return headers;
-        }
-        async function refreshSession() {
-          if (isArithCore) return false;
-          const refreshToken = localStorage.getItem('refresh_token');
-          if (!refreshToken) return false;
+        async function main() {
           try {
-            const refreshURL = new URL('/api/v1/auth/refresh', url).toString();
-            const refreshResponse = await fetch(refreshURL, {
-              method: 'POST',
-              credentials: 'include',
-              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-              body: JSON.stringify({ refresh_token: refreshToken })
-            });
-            if (!refreshResponse.ok) return false;
-            const refreshBody = JSON.parse(await refreshResponse.text());
-            const data = refreshBody && refreshBody.data ? refreshBody.data : refreshBody;
-            if (!data || !data.access_token) return false;
-            localStorage.setItem('auth_token', String(data.access_token));
-            if (data.refresh_token) localStorage.setItem('refresh_token', String(data.refresh_token));
-            if (data.expires_in) localStorage.setItem('token_expires_at', String(Date.now() + Number(data.expires_in) * 1000));
-            return true;
-          } catch (_) {
-            return false;
-          }
-        }
-        async function sendRequest() {
-          const expiresAt = Number(localStorage.getItem('token_expires_at') || 0);
-          if (!isArithCore && expiresAt > 0 && expiresAt <= Date.now() + 5000) {
-            if (!await refreshSession()) localStorage.removeItem('auth_token');
-          }
-          let response = await fetch(url, {
-            method: 'GET',
-            credentials: 'include',
-            headers: requestHeaders()
-          });
-          if (response.status === 401 && !isArithCore) {
-            if (await refreshSession()) {
-              response = await fetch(url, {
+            function requestHeaders() {
+              const authToken = String(localStorage.getItem('auth_token') || '').replace(/^Bearer\\s+/i, '');
+              const userID = String(localStorage.getItem('uid') || '');
+              const headers = {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'X-User-UI-Request': '1',
+                'Accept-Language': 'zh-CN'
+              };
+              if (authToken) headers['Authorization'] = 'Bearer ' + authToken;
+              if (isArithCore && userID) headers['New-Api-User'] = userID;
+              return headers;
+            }
+            async function refreshSession() {
+              if (isArithCore) return false;
+              const refreshToken = localStorage.getItem('refresh_token');
+              if (!refreshToken) return false;
+              try {
+                const refreshURL = new URL('/api/v1/auth/refresh', url).toString();
+                const refreshResponse = await fetch(refreshURL, {
+                  method: 'POST',
+                  credentials: 'include',
+                  headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                  body: JSON.stringify({ refresh_token: refreshToken })
+                });
+                if (!refreshResponse.ok) return false;
+                const refreshBody = JSON.parse(await refreshResponse.text());
+                const data = refreshBody && refreshBody.data ? refreshBody.data : refreshBody;
+                if (!data || !data.access_token) return false;
+                localStorage.setItem('auth_token', String(data.access_token));
+                if (data.refresh_token) localStorage.setItem('refresh_token', String(data.refresh_token));
+                if (data.expires_in) localStorage.setItem('token_expires_at', String(Date.now() + Number(data.expires_in) * 1000));
+                return true;
+              } catch (_) {
+                return false;
+              }
+            }
+            async function sendRequest() {
+              const expiresAt = Number(localStorage.getItem('token_expires_at') || 0);
+              if (!isArithCore && expiresAt > 0 && expiresAt <= Date.now() + 5000) {
+                if (!await refreshSession()) localStorage.removeItem('auth_token');
+              }
+              let response = await fetch(url, {
                 method: 'GET',
                 credentials: 'include',
                 headers: requestHeaders()
               });
-            } else {
-              localStorage.removeItem('auth_token');
+              if (response.status === 401 && !isArithCore) {
+                if (await refreshSession()) {
+                  response = await fetch(url, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: requestHeaders()
+                  });
+                } else {
+                  localStorage.removeItem('auth_token');
+                }
+              }
+              return response;
             }
+            const response = await sendRequest();
+            return { status: response.status, body: await response.text() };
+          } catch (error) {
+            return {
+              error: String(error && error.message ? error.message : error),
+              name: String(error && error.name ? error.name : 'Error')
+            };
           }
-          return response;
         }
-        const response = await sendRequest();
-        return { status: response.status, body: await response.text() };
+        return await main();
         """
         var completed = false
         let finish: (Result<Any, Error>) -> Void = { result in
@@ -455,7 +465,12 @@ private final class WebKitAPIClient: NSObject, WKNavigationDelegate, APIClient {
                 return
             case .success(let value):
                 guard let payload = value as? [String: Any],
-                      let status = (payload["status"] as? NSNumber)?.intValue,
+                      payload["error"] == nil else {
+                    let message = (value as? [String: Any])?["error"] as? String ?? "未知 JavaScript 异常"
+                    finish(.failure(MonitorError.invalidResponse("\(self.site.name) JavaScript 异常：\(message)")))
+                    return
+                }
+                guard let status = (payload["status"] as? NSNumber)?.intValue,
                       let body = payload["body"] as? String else {
                     finish(.failure(MonitorError.invalidResponse("接口响应无法读取")))
                     return
@@ -555,6 +570,8 @@ private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWin
     private let window: NSWindow
     private var timer: Timer?
     private var finished = false
+    private var captureEnabled = false
+    private var navigationFinished = false
     var onLogin: (() -> Void)?
     var onClose: (() -> Void)?
 
@@ -578,18 +595,28 @@ private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWin
 
     func show() {
         finished = false
+        captureEnabled = false
+        navigationFinished = false
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        if let url = URL(string: site.base_url + site.login_path) {
-            webView.load(URLRequest(url: url))
-        }
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.captureToken()
+        clearWebsiteSession { [weak self] in
+            guard let self, !self.finished else { return }
+            guard let url = URL(string: self.site.base_url + self.site.login_path) else { return }
+            self.webView.load(URLRequest(url: url))
+            self.timer?.invalidate()
+            self.timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                self?.captureToken()
+            }
         }
     }
 
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        navigationFinished = true
+        captureEnabled = true
+    }
+
     private func captureToken() {
+        guard captureEnabled, navigationFinished, !finished else { return }
         webView.evaluateJavaScript(tokenCaptureScript) { [weak self] result, _ in
             guard let self,
                   let token = decodedToken(from: result, allowUserID: self.site.adapter == "arithcore") else { return }
@@ -598,6 +625,22 @@ private final class LoginWindowController: NSObject, WKNavigationDelegate, NSWin
             self.finish()
             self.onLogin?()
             self.onClose?()
+        }
+    }
+
+    private func clearWebsiteSession(completion: @escaping () -> Void) {
+        let store = webView.configuration.websiteDataStore
+        let types = WKWebsiteDataStore.allWebsiteDataTypes()
+        let host = URL(string: site.base_url)?.host?.lowercased()
+        store.fetchDataRecords(ofTypes: types) { records in
+            let matching = records.filter { record in
+                guard let host else { return false }
+                return record.displayName.lowercased() == host
+                    || record.displayName.lowercased().hasSuffix("." + host)
+            }
+            store.removeData(ofTypes: types, for: matching) {
+                DispatchQueue.main.async { completion() }
+            }
         }
     }
 
@@ -1312,9 +1355,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             config = loaded
             subClient = AuthenticatedAPIClient(site: loaded.sub2api, timeout: loaded.httpTimeout, tokens: tokenStore)
             for upstream in loaded.upstreamOverrides {
-                let client = WebKitAPIClient(site: upstream.site, timeout: loaded.httpTimeout)
-                webClients[upstream.site.name] = client
-                client.start()
+                if upstream.effectiveAdapter == "arithcore" {
+                    let client = WebKitAPIClient(site: upstream.site, timeout: loaded.httpTimeout)
+                    webClients[upstream.site.name] = client
+                    client.start()
+                }
             }
             scheduleTimers(loaded)
             refreshAll()
@@ -1480,7 +1525,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.accountItems = rawItems
                     self.upstreamsByAccountID = discoveredUpstreams
                     for upstream in discoveredUpstreams.values {
-                        self.prepareWebClient(for: upstream)
+                        if upstream.effectiveAdapter == "arithcore" {
+                            self.prepareWebClient(for: upstream)
+                        }
                     }
                     self.reconcileAccountMonitorStates()
                     self.syncCurrentAccountDetails()
@@ -1572,11 +1619,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             finishMonitorRefresh(accountID: accountID, result: .failure(MonitorError.invalidResponse("缺少中转配置")))
             return
         }
-        let client: APIClient = prepareWebClient(for: upstream)
         if upstream.effectiveAdapter == "arithcore" {
-            refreshArithCoreMonitor(accountID: accountID, account: account, upstream: upstream, client: client)
+            refreshArithCoreMonitor(
+                accountID: accountID,
+                account: account,
+                upstream: upstream,
+                client: prepareWebClient(for: upstream)
+            )
             return
         }
+        let client: APIClient = AuthenticatedAPIClient(
+            site: upstream.site,
+            timeout: config?.httpTimeout ?? 8,
+            tokens: tokenStore
+        )
         client.get(path: "/api/v1/auth/me") { [weak self] balanceResult in
             guard let self else { return }
             switch balanceResult {
