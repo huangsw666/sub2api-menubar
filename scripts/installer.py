@@ -17,7 +17,7 @@ from typing import Optional
 
 LABEL = "io.github.huangsw666.sub2api-menubar"
 APP_NAME = "Sub2API Menu Bar.app"
-VERSION = "0.2.3"
+VERSION = "0.2.4"
 
 
 def paths():

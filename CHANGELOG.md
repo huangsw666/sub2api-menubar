@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.4] - 2026-08-26
+
+### Fixed
+
+- Use native authenticated requests for CallAI and wawa relay monitoring instead of hidden WebKit pages
+- Keep relay login windows open until WebKit finishes loading, and clear stale site data before re-login
+- Preserve balance and multiplier data when CallAI channel-group data is unavailable
+- Convert WebKit request failures into readable monitoring errors
+
 ## [0.2.3] - 2026-08-24
 
 ### Added
